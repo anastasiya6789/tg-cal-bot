@@ -8,6 +8,12 @@ async def init_db():
         await db.execute('''CREATE TABLE IF NOT EXISTS user_tokens (
             user_id INTEGER PRIMARY KEY,
             access_token TEXT, refresh_token TEXT, expires_at REAL)''')
+        # ✅ Новая таблица: связь пользователь <-> event_id из Google Calendar
+        await db.execute('''CREATE TABLE IF NOT EXISTS user_events (
+            user_id INTEGER,
+            gcal_event_id TEXT,
+            created_at REAL,
+            PRIMARY KEY (user_id, gcal_event_id))''')
         await db.commit()
 
 async def save_token(user_id, access_token, refresh_token, expires_in):
@@ -26,3 +32,23 @@ async def get_token(user_id):
             if datetime.now(timezone.utc).timestamp() > exp - 300:
                 return None
             return acc, ref
+
+# ✅ Новые функции для работы с event_id
+async def save_event_id(user_id, gcal_event_id):
+    """Сохраняем ID события из Google Calendar"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute('''INSERT OR REPLACE INTO user_events VALUES (?, ?, ?)''',
+                         (user_id, gcal_event_id, datetime.now(timezone.utc).timestamp()))
+        await db.commit()
+
+async def get_event_ids(user_id):
+    """Получаем все event_id пользователя"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute('SELECT gcal_event_id FROM user_events WHERE user_id = ?', (user_id,)) as cur:
+            return [row[0] for row in await cur.fetchall()]
+
+async def delete_event_id(user_id, gcal_event_id):
+    """Удаляем связь при удалении события"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute('DELETE FROM user_events WHERE user_id = ? AND gcal_event_id = ?', (user_id, gcal_event_id))
+        await db.commit()

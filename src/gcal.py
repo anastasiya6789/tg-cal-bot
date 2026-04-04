@@ -85,7 +85,7 @@ def fmt_evt(e):
 
 async def create_event(uid, data):
     cr = await get_credentials(uid)
-    if not cr: return False,"❌ Сначала подключи Google командой /connect"
+    if not cr: return False,"❌ Сначала подключи Google командой /connect", None
     
     svc = build('calendar','v3',credentials=cr)
     st = datetime.fromisoformat(data['start'])
@@ -108,10 +108,67 @@ async def create_event(uid, data):
     }
     try:
         ev = svc.events().insert(calendarId='primary',body=body).execute()
-        return True,f"✅ Создано!\n{ev.get('htmlLink','')}"
+        event_id = ev.get('id')  # ✅ Возвращаем ID
+        return True,f"✅ Создано!\n{ev.get('htmlLink','')}", event_id
     except Exception as ex:
         logger.error(f"Cal err: {ex}")
-        return False,f"❌ Ошибка: {ex}"
+        return False,f"❌ Ошибка: {ex}", None
+
+# ✅ НОВАЯ ФУНКЦИЯ: обновление события
+async def update_event(uid, event_id, new_data):
+    cr = await get_credentials(uid)
+    if not cr: return False,"❌ Сначала подключи Google"
+    
+    svc = build('calendar','v3',credentials=cr)
+    
+    # Получаем текущее событие, чтобы не перезаписать лишнее
+    try:
+        existing = svc.events().get(calendarId='primary', eventId=event_id).execute()
+    except Exception as ex:
+        logger.error(f"Failed to fetch event: {ex}")
+        return False, "❌ Событие не найдено"
+    
+    # Обновляем только переданные поля
+    if 'title' in new_data:
+        existing['summary'] = new_data['title']
+    if 'description' in new_data:
+        # Сохраняем тег типа, если он был
+        old_desc = existing.get('description', '')
+        tag_match = TYPE_TAG_RE.search(old_desc)
+        tag = tag_match.group(0) if tag_match else ''
+        new_desc = new_data['description'].strip()
+        existing['description'] = f"{new_desc}\n{tag}" if new_desc else tag
+    if 'location' in new_data:
+        existing['location'] = new_data['location'] or ''
+    if 'start' in new_data and 'end' in new_data:
+        st = datetime.fromisoformat(new_data['start'])
+        en = datetime.fromisoformat(new_data['end'])
+        if st.tzinfo is None: st = tz.localize(st)
+        if en.tzinfo is None: en = tz.localize(en)
+        existing['start'] = {'dateTime': to_iso(st), 'timeZone': TZ_NAME}
+        existing['end'] = {'dateTime': to_iso(en), 'timeZone': TZ_NAME}
+    if 'color' in new_data:
+        existing['colorId'] = new_data['color']
+    
+    try:
+        ev = svc.events().update(calendarId='primary', eventId=event_id, body=existing).execute()
+        return True, f"✅ Обновлено!\n{ev.get('htmlLink','')}"
+    except Exception as ex:
+        logger.error(f"Cal update err: {ex}")
+        return False, f"❌ Ошибка: {ex}"
+
+# ✅ НОВАЯ ФУНКЦИЯ: удаление события
+async def delete_event(uid, event_id):
+    cr = await get_credentials(uid)
+    if not cr: return False,"❌ Сначала подключи Google"
+    
+    svc = build('calendar','v3',credentials=cr)
+    try:
+        svc.events().delete(calendarId='primary', eventId=event_id).execute()
+        return True, "✅ Удалено!"
+    except Exception as ex:
+        logger.error(f"Cal delete err: {ex}")
+        return False, f"❌ Ошибка: {ex}"
 
 async def get_schedule(uid, period="day", target=None, off=0, lim=20):
     cr = await get_credentials(uid)
@@ -152,7 +209,8 @@ async def get_schedule(uid, period="day", target=None, off=0, lim=20):
                 'end':e.get('end',{}),
                 '_is_native_task':False,
                 '_sort_dt':sdt,
-                '_dk':sdt.strftime("%Y-%m-%d") if sdt else None
+                '_dk':sdt.strftime("%Y-%m-%d") if sdt else None,
+                '_eid':eid  # ✅ Добавляем event_id для CRUD
             })
     except Exception as ex: logger.error(f"Cal API: {ex}")
     
@@ -176,11 +234,12 @@ async def get_schedule(uid, period="day", target=None, off=0, lim=20):
                 'end':{'dateTime':due},
                 '_is_native_task':True,
                 '_sort_dt':due_dt,
-                '_dk':due_dt.strftime("%Y-%m-%d")
+                '_dk':due_dt.strftime("%Y-%m-%d"),
+                '_eid':t['id']  # ✅ ID задачи из Tasks API
             })
     except Exception as ex: logger.error(f"Tasks API: {ex}")
 
-    # ✅ УБИРАЕМ ДУБЛИ: если совпадает название и дата, оставляем версию с временем
+    # Убираем дубли
     deduped = {}
     for item in items:
         key = (item['summary'].strip().lower(), item.get('_dk') or '')
@@ -189,7 +248,7 @@ async def get_schedule(uid, period="day", target=None, off=0, lim=20):
             curr_has_time = 'dateTime' in item['start']
             exist_has_time = 'dateTime' in existing['start']
             if curr_has_time and not exist_has_time:
-                deduped[key] = item  # Предпочитаем запись с временем
+                deduped[key] = item
         else:
             deduped[key] = item
     items = list(deduped.values())
@@ -232,4 +291,4 @@ async def get_schedule(uid, period="day", target=None, off=0, lim=20):
                     for it in dgrp[typ][dk]: txt += fmt_evt(it)+"\n"
                     txt += "\n"
                     
-    return True,txt.strip(),more,{"start":st,"end":en}
+    return True,txt.strip(),more,{"start":st,"end":en}, pag  # ✅ Возвращаем pag для кнопок

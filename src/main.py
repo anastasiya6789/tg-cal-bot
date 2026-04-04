@@ -11,9 +11,9 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from db import init_db
+from db import init_db, save_event_id, delete_event_id
 from oauth import get_auth_url, handle_callback
-from gcal import create_event, get_schedule
+from gcal import create_event, get_schedule, update_event, delete_event
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -44,6 +44,13 @@ class EventCreation(StatesGroup):
     setting_description = State()
     setting_color = State()
     confirming = State()
+
+class EventEdit(StatesGroup):
+    editing_title = State()
+    editing_location = State()
+    editing_description = State()
+    editing_time = State()
+    confirming_edit = State()
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -102,16 +109,15 @@ async def choose_type(callback: types.CallbackQuery, state: FSMContext):
         await state.set_state(EventCreation.setting_start)
     await callback.answer()
 
-# ================= ЗАДАЧИ: только дедлайн =================
 @dp.message(EventCreation.setting_deadline)
 async def set_deadline(message: types.Message, state: FSMContext):
     if message.text.lower() == "/now":
-        dt = datetime.now(tz)  # ✅ Timezone-aware datetime
+        dt = datetime.now(tz)
     else:
         try:
             dt = datetime.strptime(message.text, "%d.%m %H:%M")
             dt = dt.replace(year=datetime.now(tz).year)
-            dt = tz.localize(dt)  # ✅ Добавляем часовой пояс
+            dt = tz.localize(dt)
         except ValueError:
             await message.answer("❌ Неверный формат. Пример: `10.04 14:00`")
             return
@@ -119,7 +125,6 @@ async def set_deadline(message: types.Message, state: FSMContext):
     await message.answer("📝 Введите название задачи:")
     await state.set_state(EventCreation.setting_title)
 
-# ================= ВСТРЕЧИ/МЕРОПРИЯТИЯ: начало + конец =================
 @dp.message(EventCreation.setting_start)
 async def set_start(message: types.Message, state: FSMContext):
     if message.text.lower() == "/now":
@@ -149,7 +154,6 @@ async def set_end(message: types.Message, state: FSMContext):
     await message.answer("📝 Введите название события:")
     await state.set_state(EventCreation.setting_title)
 
-# ================= ОБЩИЕ ШАГИ =================
 @dp.message(EventCreation.setting_title)
 async def set_title(message: types.Message, state: FSMContext):
     await state.update_data(title=message.text)
@@ -252,8 +256,13 @@ async def finalize_event(callback: types.CallbackQuery, state: FSMContext):
         "deadline": data.get('deadline')
     }
 
-    success, msg = await create_event(callback.from_user.id, event_data)
+    success, msg, event_id = await create_event(callback.from_user.id, event_data)
     await callback.message.edit_text(msg)
+    
+    # ✅ Сохраняем event_id в БД для будущего редактирования
+    if success and event_id:
+        await save_event_id(callback.from_user.id, event_id)
+    
     await state.clear()
     await callback.answer()
 
@@ -263,10 +272,25 @@ async def cancel_creation(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text("❌ Создание отменено. Введите `/create` чтобы начать заново.")
     await callback.answer()
 
+def get_event_actions_kb(event_id, event_type):
+    """Кнопки ✏️ Редактировать / 🗑 Удалить для события"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"edit|{event_type}|{event_id}")],
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del|{event_type}|{event_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_schedule")]
+    ])
+
 # ================= SCHEDULE VIEW =================
 async def show_schedule_view(message_or_cb, user_id, period, date_str, offset=0):
     try:
-        success, text, has_more, _ = await get_schedule(user_id, period, date_str, offset)
+        # ✅ get_schedule теперь возвращает 5 значений: успех, текст, has_more, даты, список событий
+        result = await get_schedule(user_id, period, date_str, offset)
+        if len(result) == 5:
+            success, text, has_more, date_range, pag_items = result
+        else:
+            success, text, has_more, date_range = result
+            pag_items = []
+        
         if not success:
             if isinstance(message_or_cb, types.Message):
                 await message_or_cb.answer(text)
@@ -275,7 +299,8 @@ async def show_schedule_view(message_or_cb, user_id, period, date_str, offset=0)
                 await message_or_cb.answer()
             return
 
-        kb = InlineKeyboardMarkup(inline_keyboard=[
+        # Кнопки навигации
+        nav_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"sched|{period}|{date_str}|{offset}|prev"),
              InlineKeyboardButton(text="➡️ Вперёд", callback_data=f"sched|{period}|{date_str}|{offset}|next")],
             [InlineKeyboardButton(text="📅 Другая дата", callback_data="sched_custom"),
@@ -283,20 +308,31 @@ async def show_schedule_view(message_or_cb, user_id, period, date_str, offset=0)
             [InlineKeyboardButton(text="🏠 Меню", callback_data="start")]
         ])
         if has_more:
-            kb.inline_keyboard.append([InlineKeyboardButton(text="📄 Ещё события", callback_data=f"sched|{period}|{date_str}|{offset+8}|more")])
+            nav_kb.inline_keyboard.append([InlineKeyboardButton(text="📄 Ещё события", callback_data=f"sched|{period}|{date_str}|{offset+8}|more")])
 
+        # ✅ Сначала отправляем заголовок расписания
         if isinstance(message_or_cb, types.Message):
-            await message_or_cb.answer(text, reply_markup=kb)
+            await message_or_cb.answer(text, reply_markup=nav_kb)
+            msg_ref = message_or_cb
         else:
-            try:
-                await message_or_cb.message.edit_text(text, reply_markup=kb)
-            except Exception as edit_err:
-                if "message is not modified" in str(edit_err).lower():
-                    await message_or_cb.answer("✅ Обновлено")
-                else:
-                    logger.error(f"Edit error: {edit_err}")
-                    await message_or_cb.answer("⚠️ Ошибка обновления")
+            await message_or_cb.message.edit_text(text, reply_markup=nav_kb)
+            msg_ref = message_or_cb.message
             await message_or_cb.answer()
+
+        # ✅ Затем отправляем каждое событие отдельным сообщением с кнопками
+        for item in pag_items:
+            from gcal import fmt_evt, detect_type
+            line = fmt_evt(item)
+            event_id = item.get('_eid')
+            event_type = item.get('_typ', 'event')
+            
+            if event_id:
+                actions_kb = get_event_actions_kb(event_id, event_type)
+                await msg_ref.answer(line, reply_markup=actions_kb)
+            else:
+                # Если нет event_id (старые события) — отправляем без кнопок
+                await msg_ref.answer(line)
+                
     except Exception as e:
         logger.error(f"Ошибка в show_schedule_view: {e}\n{traceback.format_exc()}")
         err_text = "❌ Ошибка загрузки расписания"
@@ -405,6 +441,122 @@ async def gcal_callback(request):
 async def on_startup(app):
     await bot.set_webhook(f"{WEBHOOK_URL}/webhook")
     logger.info(f"✅ Webhook установлен: {WEBHOOK_URL}/webhook")
+
+# ✅ Хендлер: нажали "Удалить"
+@dp.callback_query(F.data.startswith("del|"))
+async def handle_delete(callback: types.CallbackQuery):
+    try:
+        _, typ, event_id = callback.data.split("|")
+        success, msg = await delete_event(callback.from_user.id, event_id)
+        
+        # ✅ Удаляем из локальной БД
+        await delete_event_id(callback.from_user.id, event_id)
+        
+        await callback.message.edit_text(msg)
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"Delete error: {e}")
+        await callback.answer("❌ Ошибка при удалении", show_alert=True)
+
+# ✅ Хендлер: нажали "Редактировать" → выбор поля
+@dp.callback_query(F.data.startswith("edit|"))
+async def start_edit(callback: types.CallbackQuery, state: FSMContext):
+    try:
+        _, typ, event_id = callback.data.split("|")
+        await state.update_data(edit_event_id=event_id, edit_type=typ)
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔖 Название", callback_data="edit_field_title"),
+             InlineKeyboardButton(text="📍 Локация", callback_data="edit_field_location")],
+            [InlineKeyboardButton(text="📝 Описание", callback_data="edit_field_description"),
+             InlineKeyboardButton(text="🕒 Время", callback_data="edit_field_time")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_edit")]
+        ])
+        await callback.message.edit_text("✏️ Что изменить?", reply_markup=kb)
+        await state.set_state(EventEdit.editing_title)
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"Edit start error: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+@dp.callback_query(F.data.startswith("edit_field_"))
+async def choose_edit_field(callback: types.CallbackQuery, state: FSMContext):
+    field = callback.data.split("_")[2]
+    await state.update_data(edit_field=field)
+    
+    if field == "time":
+        await callback.message.edit_text("🕒 Введите новое время: `ДД.ММ ЧЧ:ММ - ДД.ММ ЧЧ:ММ`")
+        await state.set_state(EventEdit.editing_time)
+    else:
+        field_names = {"title": "название", "location": "локацию", "description": "описание"}
+        await callback.message.edit_text(f"✏️ Введите новое {field_names.get(field, 'поле')}:")
+        if field == "title":
+            await state.set_state(EventEdit.editing_title)
+        elif field == "location":
+            await state.set_state(EventEdit.editing_location)
+        elif field == "description":
+            await state.set_state(EventEdit.editing_description)
+    await callback.answer()
+
+@dp.message(EventEdit.editing_title)
+async def save_new_title(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    success, msg = await update_event(message.from_user.id, data['edit_event_id'], {'title': message.text})
+    await message.answer(msg)
+    await state.clear()
+
+@dp.message(EventEdit.editing_location)
+async def save_new_location(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    success, msg = await update_event(message.from_user.id, data['edit_event_id'], {'location': message.text})
+    await message.answer(msg)
+    await state.clear()
+
+@dp.message(EventEdit.editing_description)
+async def save_new_description(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    success, msg = await update_event(message.from_user.id, data['edit_event_id'], {'description': message.text})
+    await message.answer(msg)
+    await state.clear()
+
+@dp.message(EventEdit.editing_time)
+async def save_new_time(message: types.Message, state: FSMContext):
+    try:
+        parts = message.text.split("-")
+        if len(parts) != 2:
+            await message.answer("❌ Формат: `ДД.ММ ЧЧ:ММ - ДД.ММ ЧЧ:ММ`")
+            return
+        
+        st = datetime.strptime(parts[0].strip(), "%d.%m %H:%M")
+        en = datetime.strptime(parts[1].strip(), "%d.%m %H:%M")
+        st = st.replace(year=datetime.now().year)
+        en = en.replace(year=datetime.now().year)
+        
+        data = await state.get_data()
+        success, msg = await update_event(message.from_user.id, data['edit_event_id'], {
+            'start': st.isoformat(),
+            'end': en.isoformat()
+        })
+        await message.answer(msg)
+        await state.clear()
+    except ValueError:
+        await message.answer("❌ Неверный формат. Пример: `10.04 14:00 - 10.04 15:30`")
+
+@dp.callback_query(F.data == "cancel_edit")
+@dp.message(F.text.lower() == "/cancel", StateFilter(EventEdit))
+async def cancel_edit(message_or_cb, state: FSMContext):
+    await state.clear()
+    response = message_or_cb.message if hasattr(message_or_cb, 'message') else message_or_cb
+    await response.answer("✏️ Редактирование отменено")
+    if hasattr(message_or_cb, 'answer'): await message_or_cb.answer()
+
+@dp.callback_query(F.data == "back_to_schedule")
+async def back_to_schedule(callback: types.CallbackQuery):
+    from datetime import datetime
+    today = datetime.now().strftime("%Y-%m-%d")
+    await callback.message.edit_text("🔄 Обновляю...")
+    await callback.answer()
+    await callback.message.answer("Нажмите /schedule, чтобы увидеть обновлённое расписание")
 
 def main():
     import asyncio

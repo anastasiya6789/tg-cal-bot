@@ -24,7 +24,6 @@ def parse_dt(d):
     try:
         if 'T' in s:
             if s.endswith('Z'):
-                # UTC → локальное время
                 dt = datetime.fromisoformat(s.replace('Z','+00:00')).astimezone(tz)
             else:
                 dt = datetime.fromisoformat(s)
@@ -72,13 +71,13 @@ async def create_event(uid, data):
     
     if data.get('type')=='task':
         ts = build('tasks','v1',credentials=cr)
-        # Парсим локальное время из input
         due_local = datetime.fromisoformat(data['start'])
-        if due_local.tzinfo is None: due_local = tz.localize(due_local)
+        if due_local.tzinfo is None: 
+            due_local = tz.localize(due_local)
         
-        # ✅ Конвертируем локальное время → UTC для отправки в API
+        # ✅ Конвертируем в UTC и форматируем в правильный RFC3339
         due_utc = due_local.astimezone(pytz.UTC)
-        due_str = due_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        due_str = due_utc.isoformat().replace('+00:00', 'Z')
         
         try:
             ts.tasks().insert(tasklist='@default',body={
@@ -156,30 +155,46 @@ async def get_schedule(uid, period="day", target=None, off=0, lim=20):
             })
     except Exception as ex: logger.error(f"Cal API: {ex}")
     
-    # Tasks API
+    # Tasks API - ✅ ИСПРАВЛЕННЫЙ ПАРСИНГ
     try:
         ts = build('tasks','v1',credentials=cr)
-        # Запрашиваем задачи в том же диапазоне (в формате, который понимает API)
-        tmin = st.astimezone(pytz.UTC).strftime("%Y-%m-%dT00:00:00.000Z")
-        tmax = en.astimezone(pytz.UTC).strftime("%Y-%m-%dT23:59:59.000Z")
+        tmin = st.astimezone(pytz.UTC).strftime("%Y-%m-%dT00:00:00Z")
+        tmax = en.astimezone(pytz.UTC).strftime("%Y-%m-%dT23:59:59Z")
         
         tasks_list = ts.tasks().list(tasklist='@default',dueMin=tmin,dueMax=tmax,showCompleted=False,showHidden=False).execute()
         for t in tasks_list.get('items',[]):
             due = t.get('due')
             if not due: continue
             
-            # ✅ Конвертируем из UTC в локальное время для отображения
-            if due.endswith('Z'):
-                dt_utc = datetime.fromisoformat(due)
+            # ✅ Надёжный парсинг RFC3339 даты из Tasks API
+            try:
+                if due.endswith('Z'):
+                    # Python < 3.11 не понимает 'Z', заменяем на '+00:00'
+                    dt_utc = datetime.fromisoformat(due.replace('Z', '+00:00'))
+                else:
+                    dt_utc = datetime.fromisoformat(due)
+                
                 dt_local = dt_utc.astimezone(tz)
-                disp = dt_local.strftime("%H:%M")
+                
+                # Проверяем, есть ли время в строке (не только дата)
+                if 'T' in due and len(due) > 10:
+                    disp = dt_local.strftime("%H:%M")
+                else:
+                    disp = "до 23:59"
+                
                 sdt = dt_local
-            else:
-                # fallback: парсим как есть
-                disp = "до конца дня"
-                sdt = tz.localize(datetime.strptime(due[:10],"%Y-%m-%d").replace(hour=23,minute=59))
+            except Exception as e:
+                logger.warning(f"Failed to parse task due '{due}': {e}")
+                # Fallback: считаем дедлайн на конец дня
+                try:
+                    sdt = tz.localize(datetime.strptime(due[:10],"%Y-%m-%d").replace(hour=23,minute=59))
+                    disp = "до 23:59"
+                except:
+                    continue
             
+            # ✅ Фильтрация с учётом часовых поясов
             if sdt < st or sdt > en: continue
+            
             items.append({
                 'summary':t['title'],
                 'description':t.get('notes',''),

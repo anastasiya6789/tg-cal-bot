@@ -36,9 +36,9 @@ class ScheduleFSM(StatesGroup):
 
 class EventCreation(StatesGroup):
     choosing_type = State()
-    setting_deadline = State()  # только для задач
-    setting_start = State()     # только для встреч/мероприятий
-    setting_end = State()       # только для встреч/мероприятий
+    setting_deadline = State()
+    setting_start = State()
+    setting_end = State()
     setting_title = State()
     setting_location = State()
     setting_description = State()
@@ -94,7 +94,6 @@ async def choose_type(callback: types.CallbackQuery, state: FSMContext):
     event_type = callback.data.split("_")[1]
     await state.update_data(type=event_type)
     
-    # ✅ РАЗНЫЕ ПОТОКИ:
     if event_type == "task":
         await callback.message.edit_text("✅ Введите ДЕДЛАЙН задачи: `ДД.ММ ЧЧ:ММ`\n(или `/now` для сейчас)")
         await state.set_state(EventCreation.setting_deadline)
@@ -107,14 +106,15 @@ async def choose_type(callback: types.CallbackQuery, state: FSMContext):
 @dp.message(EventCreation.setting_deadline)
 async def set_deadline(message: types.Message, state: FSMContext):
     if message.text.lower() == "/now":
-        dt = datetime.now()
+        dt = datetime.now(tz)  # ✅ Timezone-aware datetime
     else:
         try:
-            dt = datetime.strptime(message.text, "%d.%m %H:%M").replace(year=datetime.now().year)
+            dt = datetime.strptime(message.text, "%d.%m %H:%M")
+            dt = dt.replace(year=datetime.now(tz).year)
+            dt = tz.localize(dt)  # ✅ Добавляем часовой пояс
         except ValueError:
             await message.answer("❌ Неверный формат. Пример: `10.04 14:00`")
             return
-    # Для задач: deadline = start (в Tasks API только due)
     await state.update_data(start=dt.isoformat(), end=dt.isoformat(), deadline=dt.strftime("%d.%m %H:%M"))
     await message.answer("📝 Введите название задачи:")
     await state.set_state(EventCreation.setting_title)
@@ -123,10 +123,12 @@ async def set_deadline(message: types.Message, state: FSMContext):
 @dp.message(EventCreation.setting_start)
 async def set_start(message: types.Message, state: FSMContext):
     if message.text.lower() == "/now":
-        dt = datetime.now()
+        dt = datetime.now(tz)
     else:
         try:
-            dt = datetime.strptime(message.text, "%d.%m %H:%M").replace(year=datetime.now().year)
+            dt = datetime.strptime(message.text, "%d.%m %H:%M")
+            dt = dt.replace(year=datetime.now(tz).year)
+            dt = tz.localize(dt)
         except ValueError:
             await message.answer("❌ Неверный формат. Пример: `10.04 14:00`")
             return
@@ -137,7 +139,9 @@ async def set_start(message: types.Message, state: FSMContext):
 @dp.message(EventCreation.setting_end)
 async def set_end(message: types.Message, state: FSMContext):
     try:
-        dt = datetime.strptime(message.text, "%d.%m %H:%M").replace(year=datetime.now().year)
+        dt = datetime.strptime(message.text, "%d.%m %H:%M")
+        dt = dt.replace(year=datetime.now(tz).year)
+        dt = tz.localize(dt)
     except ValueError:
         await message.answer("❌ Неверный формат. Пример: `10.04 15:30`")
         return
@@ -203,7 +207,6 @@ async def confirm_event(message: types.Message, state: FSMContext):
     type_map = {"meeting": "Встреча", "task": "Задача", "event": "Мероприятие"}
     
     if data.get("type") == "task":
-        # Для задач: показываем только дедлайн
         deadline_str = data.get('deadline', data.get('start', '')[:16].replace('T', ' '))
         preview = (
             f"✅ <b>Предпросмотр задачи</b>\n\n"
@@ -213,7 +216,6 @@ async def confirm_event(message: types.Message, state: FSMContext):
             f"📝 Описание: {data.get('description') or '—'}\n"
         )
     else:
-        # Для встреч/мероприятий: показываем интервал
         start_str = data['start'][:16].replace('T', ' ')
         end_str = data['end'][:16].replace('T', ' ')
         preview = (

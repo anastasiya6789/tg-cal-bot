@@ -39,49 +39,51 @@ async def create_event(user_id, event_data):
     except Exception as e:
         return False, f"❌ Ошибка Google Calendar: {str(e)}"
 
-async def get_schedule(user_id, period="today"):
+async def get_schedule(user_id, period="day", target_date=None, offset=0, limit=8):
     creds = await get_credentials(user_id)
     if not creds:
-        return False, "❌ Сначала подключи Google командой /connect"
+        return False, "❌ Сначала подключи Google", False
 
     tz = pytz.timezone(TZ_NAME)
-    now = datetime.now(tz)
+    base_dt = datetime.strptime(target_date, "%Y-%m-%d") if target_date else datetime.now(tz)
 
-    if period == "today":
-        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = now.replace(hour=23, minute=59, second=59, microsecond=0)
+    if period == "day":
+        start = base_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start.replace(hour=23, minute=59, second=59, microsecond=0)
     elif period == "week":
-        start = now - timedelta(days=now.weekday())
+        start = base_dt - timedelta(days=base_dt.weekday())
         start = start.replace(hour=0, minute=0, second=0, microsecond=0)
         end = start + timedelta(days=6, hours=23, minutes=59, seconds=59, microseconds=0)
     elif period == "month":
-        start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        if now.month == 12:
-            end = now.replace(year=now.year+1, month=1, day=1, microsecond=0) - timedelta(seconds=1)
+        start = base_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        if base_dt.month == 12:
+            end = start.replace(year=base_dt.year+1, month=1, day=1, microsecond=0) - timedelta(seconds=1)
         else:
-            end = now.replace(month=now.month+1, day=1, microsecond=0) - timedelta(seconds=1)
-    else:
-        return False, "❌ Неизвестный период"
+            end = start.replace(month=base_dt.month+1, day=1, microsecond=0) - timedelta(seconds=1)
 
     service = build('calendar', 'v3', credentials=creds)
     events_result = service.events().list(
-        calendarId='primary',
-        timeMin=start.isoformat(),
-        timeMax=end.isoformat(),
-        singleEvents=True,
-        orderBy='startTime'
+        calendarId='primary', timeMin=start.isoformat(),
+        timeMax=end.isoformat(), singleEvents=True, orderBy='startTime'
     ).execute()
-    events = events_result.get('items', [])
+    all_events = events_result.get('items', [])
 
-    if not events:
-        return True, f"📭 Нет событий на этот период ({period})"
+    paginated = all_events[offset:offset+limit]
+    has_more = len(all_events) > offset + limit
 
-    text = f"📋 Расписание ({period}):\n\n"
-    for e in events:
-        start_dt = e['start'].get('dateTime', e['start'].get('date'))
-        s_time = start_dt[11:16] if len(start_dt) > 16 else "весь день"
-        title = e.get('summary', 'Без названия')
-        loc = f" 📍{e.get('location', '')}" if e.get('location') else ""
-        text += f"⏰ {s_time} — {title}{loc}\n"
+    if not paginated:
+        text = "📭 Нет событий на этот период."
+    else:
+        period_label = {"day": "день", "week": "неделю", "month": "месяц"}[period]
+        date_str = base_dt.strftime("%d.%m.%Y")
+        text = f"📋 Расписание на {period_label} ({date_str}):\n\n"
+        for e in paginated:
+            start_dt = e['start'].get('dateTime', e['start'].get('date'))
+            s_time = start_dt[11:16] if len(start_dt) > 16 else "весь день"
+            title = e.get('summary', 'Без названия')
+            loc = f" 📍{e.get('location', '')}" if e.get('location') else ""
+            desc = e.get('description', '')
+            desc_short = f" 💬 {desc[:35]}..." if len(desc) > 35 else f" 💬 {desc}" if desc else ""
+            text += f"⏰ {s_time} — {title}{loc}{desc_short}\n"
 
-    return True, text
+    return True, text, has_more

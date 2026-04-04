@@ -35,7 +35,6 @@ async def get_token(user_id):
 
 # ✅ Новые функции для работы с event_id
 async def save_event_id(user_id, gcal_event_id):
-    """Сохраняем ID события из Google Calendar"""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute('''INSERT OR REPLACE INTO user_events VALUES (?, ?, ?)''',
                          (user_id, gcal_event_id, datetime.now(timezone.utc).timestamp()))
@@ -48,7 +47,6 @@ async def get_event_ids(user_id):
             return [row[0] for row in await cur.fetchall()]
 
 async def delete_event_id(user_id, gcal_event_id):
-    """Удаляем связь при удалении события"""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute('DELETE FROM user_events WHERE user_id = ? AND gcal_event_id = ?', (user_id, gcal_event_id))
         await db.commit()

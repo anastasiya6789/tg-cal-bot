@@ -109,7 +109,7 @@ async def create_event(uid, data):
     try:
         ev = svc.events().insert(calendarId='primary',body=body).execute()
         event_id = ev.get('id')  # ✅ Возвращаем ID
-        return True,f"✅ Создано!\n{ev.get('htmlLink','')}", event_id
+        return True, f"✅ Создано!\n{ev.get('htmlLink','')}", ev.get('id')  # ← возврат ID
     except Exception as ex:
         logger.error(f"Cal err: {ex}")
         return False,f"❌ Ошибка: {ex}", None
@@ -291,4 +291,4 @@ async def get_schedule(uid, period="day", target=None, off=0, lim=20):
                     for it in dgrp[typ][dk]: txt += fmt_evt(it)+"\n"
                     txt += "\n"
                     
-    return True,txt.strip(),more,{"start":st,"end":en}, pag  # ✅ Возвращаем pag для кнопок
+    return True, txt.strip(), more, {"start":st,"end":en}, pag  # ← 5 значений

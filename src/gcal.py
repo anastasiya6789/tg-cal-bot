@@ -7,7 +7,6 @@ logger = logging.getLogger(__name__)
 TZ_NAME = os.getenv("TIMEZONE", "Europe/Moscow")
 tz = pytz.timezone(TZ_NAME)
 
-# ✅ Теперь ищем task тоже
 TYPE_TAG_RE = re.compile(r'<!--\s*TG_TYPE:\s*(meeting|event|task)\s*-->', re.I)
 TASK_KEYWORDS = ['дедлайн', 'deadline', 'задача', 'task', 'сделать', 'подготовить', 'лаба', 'реферат', 'отчет', 'дз']
 TYPE_EMOJI = {'meeting':'📅 Встречи','task':'✅ Задачи','event':'🎯 Мероприятия'}
@@ -34,30 +33,20 @@ def parse_dt(s):
     except: return None
 
 def detect_type(e):
-    # 1. Старые задачи из Tasks API
     if e.get('_is_native_task'): return 'task'
-    
-    # 2. Новые задачи из бота (есть тег)
     desc = e.get('description') or ''
     m = TYPE_TAG_RE.search(desc)
     if m: return m.group(1).lower()
-    
-    # 3. Встречи с участниками
     if e.get('attendees'): return 'meeting'
-    
-    # 4. Авто-определение по ключевым словам
     ttl = (e.get('summary') or '').lower()
     if any(kw in f"{ttl} {desc.lower()}" for kw in TASK_KEYWORDS):
         return 'task'
-        
     return 'event'
 
 def clean_description(desc):
     if not desc: return ''
     desc = TYPE_TAG_RE.sub('', desc).strip()
     desc_lower = desc.lower().strip()
-    
-    # ✅ Жёсткая фильтрация авто-текстов Google (учитываем "...", регистр и пробелы)
     for ad in AUTO_DESC:
         ad_clean = ad.lower().strip()
         if desc_lower == ad_clean or desc_lower.startswith(ad_clean):
@@ -67,8 +56,6 @@ def clean_description(desc):
 def fmt_evt(e):
     start_data = e.get('start', {})
     end_data = e.get('end', {})
-    
-    # ✅ Надёжное определение全天ного события
     is_all_day = 'date' in start_data and 'dateTime' not in start_data
     
     if is_all_day:
@@ -79,7 +66,6 @@ def fmt_evt(e):
             time_str = "весь день"
         else:
             t_start = dt_str[11:16]
-            # Если Google отдал dateTime но время 00:00 → считаем全天ным
             if t_start == "00:00":
                 time_str = "весь день"
             else:
@@ -101,7 +87,6 @@ async def create_event(uid, data):
     cr = await get_credentials(uid)
     if not cr: return False,"❌ Сначала подключи Google командой /connect"
     
-    # ✅ ВСЁ создаём через Calendar API (чтобы сохранялось время)
     svc = build('calendar','v3',credentials=cr)
     st = datetime.fromisoformat(data['start'])
     en = datetime.fromisoformat(data['end'])
@@ -152,11 +137,10 @@ async def get_schedule(uid, period="day", target=None, off=0, lim=20):
     # 1. Calendar Events
     try:
         cal = build('calendar','v3',credentials=cr)
-        seen_ids = set()  # ✅ Защита от дублей из API
+        seen_ids = set()
         for e in cal.events().list(calendarId='primary',timeMin=to_iso(st),timeMax=to_iso(en),singleEvents=True,orderBy='startTime').execute().get('items',[]):
             eid = e.get('id')
-            if eid in seen_ids:
-                continue
+            if eid in seen_ids: continue
             seen_ids.add(eid)
             
             sdt = parse_dt(e.get('start',{}).get('dateTime') or e.get('start',{}).get('date'))
@@ -172,7 +156,7 @@ async def get_schedule(uid, period="day", target=None, off=0, lim=20):
             })
     except Exception as ex: logger.error(f"Cal API: {ex}")
     
-    # 2. Tasks API (старые задачи)
+    # 2. Tasks API
     try:
         ts = build('tasks','v1',credentials=cr)
         tmin = (st - timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
@@ -195,6 +179,20 @@ async def get_schedule(uid, period="day", target=None, off=0, lim=20):
                 '_dk':due_dt.strftime("%Y-%m-%d")
             })
     except Exception as ex: logger.error(f"Tasks API: {ex}")
+
+    # ✅ УБИРАЕМ ДУБЛИ: если совпадает название и дата, оставляем версию с временем
+    deduped = {}
+    for item in items:
+        key = (item['summary'].strip().lower(), item.get('_dk') or '')
+        existing = deduped.get(key)
+        if existing:
+            curr_has_time = 'dateTime' in item['start']
+            exist_has_time = 'dateTime' in existing['start']
+            if curr_has_time and not exist_has_time:
+                deduped[key] = item  # Предпочитаем запись с временем
+        else:
+            deduped[key] = item
+    items = list(deduped.values())
     
     # Сортировка и группировка
     items.sort(key=lambda x: x.get('_sort_dt') or datetime.max.replace(tzinfo=tz))

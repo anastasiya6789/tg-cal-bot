@@ -26,8 +26,7 @@ def group_events_by_day(events: list) -> dict:
     grouped = {}
     for e in events:
         start_dt = e['start'].get('dateTime', e['start'].get('date'))
-        # Извлекаем дату (первые 10 символов: YYYY-MM-DD)
-        date_key = start_dt[:10]
+        date_key = start_dt[:10]  # YYYY-MM-DD
         if date_key not in grouped:
             grouped[date_key] = []
         grouped[date_key].append(e)
@@ -88,6 +87,7 @@ async def get_schedule(user_id, period="day", target_date=None, offset=0, limit=
     if not creds:
         return False, "❌ Сначала подключи Google", False, None
 
+    # Базовая дата с таймзоной
     if target_date:
         base_dt = datetime.strptime(target_date, "%Y-%m-%d")
         base_dt = tz.localize(base_dt.replace(hour=12, minute=0, second=0))
@@ -128,7 +128,7 @@ async def get_schedule(user_id, period="day", target_date=None, offset=0, limit=
     paginated = all_events[offset:offset+limit]
     has_more = len(all_events) > offset + limit
 
-    # Формируем красивый вывод
+    # Формируем красивый вывод с группировкой по дням
     if not paginated:
         text = "📭 Нет событий на этот период."
     else:
@@ -136,10 +136,9 @@ async def get_schedule(user_id, period="day", target_date=None, offset=0, limit=
         date_range = format_date_range(period, start, end)
         text = f"📋 Расписание на {period_label} ({date_range}):\n\n"
         
-        # Группируем по дням
+        # Группируем по дням и форматируем
         grouped = group_events_by_day(paginated)
         for date_key in sorted(grouped.keys()):
-            # Форматируем заголовок дня: 13.04.2026
             day_dt = datetime.strptime(date_key, "%Y-%m-%d")
             day_header = day_dt.strftime("🗓 %d.%m.%Y")
             text += f"{day_header}\n"
@@ -147,4 +146,6 @@ async def get_schedule(user_id, period="day", target_date=None, offset=0, limit=
                 text += format_event(e) + "\n"
             text += "\n"  # пустая строка между днями
 
-    return True, text, has_more, {"start": start, "end": end}
+    # Возвращаем 4 значения, как и обещали
+    period_data = {"start": start, "end": end}
+    return True, text.strip(), has_more, period_data

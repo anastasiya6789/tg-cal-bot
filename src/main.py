@@ -47,7 +47,7 @@ async def cmd_start(message: types.Message):
         [InlineKeyboardButton(text="📅 Моё расписание", callback_data="schedule")],
         [InlineKeyboardButton(text="🔗 Подключить Google", callback_data="connect")]
     ])
-    await message.answer("👋 Привет! Я твой помощник по расписанию.\n\n🔧 Команды:\n/start — Меню\n/create — Создать\n/schedule — Расписание\n/connect — Google аккаунт", reply_markup=kb)
+    await message.answer("👋 Привет! Я твой помощник по расписанию.\n\n🔧 Команды:\n/start — Меню\n/create — Создать\n/schedule — Расписание", reply_markup=kb)
 
 # ================= CONNECT GOOGLE =================
 @dp.message(Command("connect"))
@@ -79,7 +79,7 @@ async def start_creation(message_or_cb: types.Message | types.CallbackQuery, sta
 @dp.callback_query(F.data.startswith("type_"))
 async def choose_type(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(type=callback.data.split("_")[1])
-    await callback.message.edit_text("📅 Введите дату и время НАЧАЛА в формате: `ДД.ММ ЧЧ:ММ`\n(или `/now` для текущего времени)")
+    await callback.message.edit_text("📅 Введите дату и время НАЧАЛА: `ДД.ММ ЧЧ:ММ`\n(или `/now` для сейчас)")
     await state.set_state(EventCreation.setting_start)
     await callback.answer()
 
@@ -235,7 +235,7 @@ async def cancel_creation(callback: types.CallbackQuery, state: FSMContext):
 
 # ================= SCHEDULE VIEW =================
 async def show_schedule_view(message_or_cb, user_id, period, date_str, offset=0):
-    # ✅ Исправлено: распаковываем 4 значения (добавлен период данных)
+    # ✅ Распаковываем 4 значения
     success, text, has_more, _ = await get_schedule(user_id, period, date_str, offset)
     if not success:
         await (message_or_cb.message.edit_text(text) if hasattr(message_or_cb, 'message') else message_or_cb.answer(text))
@@ -299,14 +299,15 @@ async def navigate_schedule(callback: types.CallbackQuery):
             if m < 1: m, y = 12, y - 1
             base_dt = base_dt.replace(year=y, month=m, day=1)
 
-    await show_schedule_view(callback, callback.from_user.id, period, base_dt.strftime("%Y-%m-%d"), 0)  # ✅ Сброс оффсета при навигации
+    # ✅ Сбрасываем offset при навигации между периодами
+    await show_schedule_view(callback, callback.from_user.id, period, base_dt.strftime("%Y-%m-%d"), 0)
 
 # ================= CUSTOM DATE FSM =================
 @dp.callback_query(F.data == "sched_custom")
 async def ask_custom_date(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(ScheduleFSM.waiting_custom_date)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="schedule")]])
-    await callback.message.edit_text("📅 Введите дату в формате `ДД.ММ.ГГГГ` (например: `15.04.2026`):", reply_markup=kb)
+    await callback.message.edit_text("📅 Введите дату: `ДД.ММ.ГГГГ` (пример: `15.04.2026`):", reply_markup=kb)
     await callback.answer()
 
 @dp.message(ScheduleFSM.waiting_custom_date, F.text.regexp(r"^\d{2}\.\d{2}\.\d{4}$"))
@@ -321,15 +322,14 @@ async def handle_custom_date(message: types.Message, state: FSMContext):
 
 @dp.message(ScheduleFSM.waiting_custom_date)
 async def invalid_custom_date(message: types.Message, state: FSMContext):
-    await message.answer("❌ Неверный формат. Введите дату как `15.04.2026` или нажмите /skip для отмены")
+    await message.answer("❌ Неверный формат. Введите `15.04.2026` или нажмите /skip")
 
-# ✅ Исправлено: добавлен StateFilter для корректной работы с состоянием
 @dp.callback_query(F.data == "schedule", StateFilter(ScheduleFSM.waiting_custom_date))
 @dp.message(F.text.lower() == "/skip", StateFilter(ScheduleFSM.waiting_custom_date))
 async def cancel_custom_date(message_or_cb: types.Message | types.CallbackQuery, state: FSMContext):
     await state.clear()
     response = message_or_cb.message if hasattr(message_or_cb, 'message') else message_or_cb
-    await response.answer("❌ Ввод даты отменён. Выберите период:")
+    await response.answer("❌ Отменено. Выберите период:")
     if hasattr(message_or_cb, 'answer'): await message_or_cb.answer()
 
 # ================= WEBHOOK & STARTUP =================
@@ -341,9 +341,9 @@ async def gcal_callback(request):
     user_id = int(state.split("_")[0])
     try:
         await handle_callback(code, state, user_id)
-        await bot.send_message(user_id, "✅ Google аккаунт успешно подключён!")
+        await bot.send_message(user_id, "✅ Google аккаунт подключён!")
     except Exception as e:
-        await bot.send_message(user_id, f"❌ Ошибка подключения: {e}")
+        await bot.send_message(user_id, f"❌ Ошибка: {e}")
     return web.HTTPFound(f"https://t.me/{bot.me.username}")
 
 async def on_startup(app):

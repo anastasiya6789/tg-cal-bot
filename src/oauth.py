@@ -5,7 +5,11 @@ import urllib.parse
 import requests
 from db import get_token, save_token
 
-SCOPES = ['https://www.googleapis.com/auth/calendar']
+# ✅ ДОБАВЛЯЕМ SCOPE ДЛЯ ЗАДАЧ
+SCOPES = [
+    'https://www.googleapis.com/auth/calendar',
+    'https://www.googleapis.com/auth/tasks' 
+]
 REDIRECT_URI = os.getenv('REDIRECT_URI')
 CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
 CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')
@@ -17,10 +21,10 @@ def get_auth_url(state):
         'client_id': CLIENT_ID,
         'redirect_uri': REDIRECT_URI,
         'response_type': 'code',
-        'scope': ' '.join(SCOPES),
+        'scope': ' '.join(SCOPES), # Теперь просим оба доступа
         'state': state,
         'access_type': 'offline',
-        'prompt': 'consent',
+        'prompt': 'consent', # Важно: чтобы перегенерировать refresh_token с новыми правами
     }
     return f"{AUTH_URI}?{urllib.parse.urlencode(params)}"
 

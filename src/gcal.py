@@ -8,7 +8,6 @@ import re
 TZ_NAME = os.getenv("TIMEZONE", "Europe/Moscow")
 tz = pytz.timezone(TZ_NAME)
 
-# Скрытый тег типа в описании (не виден в UI Google)
 TYPE_TAG_RE = re.compile(r'<!--\s*TG_TYPE:\s*(meeting|task|event)\s*-->')
 TASK_KEYWORDS = ['дедлайн', 'deadline', 'задача', 'task', 'сделать', 'подготовить']
 
@@ -29,13 +28,15 @@ def format_date_range(period, start, end):
     return s if period == "day" else f"{s}–{e}"
 
 def detect_type(e):
-    """Определяет тип события: тег → эвристика → fallback"""
     desc = e.get('description', '')
     m = TYPE_TAG_RE.search(desc)
     if m:
         return m.group(1)
     
-    # Эвристика для событий, созданных вручную в GCal
+    # Если это принудительно помеченная задача из API
+    if e.get('_is_native_task'):
+        return 'task'
+
     if e.get('attendees'):
         return 'meeting'
     if any(kw in desc.lower() for kw in TASK_KEYWORDS):
@@ -43,7 +44,6 @@ def detect_type(e):
     return 'event'
 
 def clean_description(desc):
-    """Убирает служебные теги из описания для чистого вывода"""
     return TYPE_TAG_RE.sub('', desc).strip()
 
 def format_event(e):
@@ -66,7 +66,6 @@ async def create_event(user_id, event_data):
     if start_dt.tzinfo is None: start_dt = tz.localize(start_dt)
     if end_dt.tzinfo is None: end_dt = tz.localize(end_dt)
 
-    # Добавляем скрытый тег типа в конец описания
     base_desc = event_data.get('description', '')
     type_tag = f"<!-- TG_TYPE:{event_data['type']} -->"
     full_desc = f"{base_desc}\n{type_tag}" if base_desc else type_tag
@@ -113,26 +112,58 @@ async def get_schedule(user_id, period="day", target_date=None, offset=0, limit=
 
     service = build('calendar', 'v3', credentials=creds)
     try:
+        # 1. Получаем обычные события
         res = service.events().list(
             calendarId='primary', timeMin=to_iso(start), timeMax=to_iso(end),
             singleEvents=True, orderBy='startTime'
         ).execute()
+        events = res.get('items', [])
+        
+        # 2. Получаем ЗАДАЧИ (Tasks API)
+        tasks_service = build('tasks', 'v1', credentials=creds)
+        tasks_res = tasks_service.tasks().list(
+            tasklist='@default', 
+            dueMin=to_iso(start), 
+            dueMax=to_iso(end),
+            showCompleted=False, # Скрываем выполненные задачи
+            showHidden=False
+        ).execute()
+        tasks = tasks_res.get('items', [])
     except Exception as e:
         return False, f"❌ Ошибка API: {str(e)}", False, None
 
-    all_events = res.get('items', [])
+    # 3. Нормализуем задачи, чтобы они выглядели как события
+    normalized_tasks = []
+    for t in tasks:
+        due = t.get('due') # Формат ISO 8601
+        if not due: continue
+        
+        # Приводим задачу к формату события
+        normalized_tasks.append({
+            'summary': t['title'],
+            'description': t.get('notes', ''),
+            'location': '',
+            'start': {'dateTime': due},
+            '_is_native_task': True # Метка для детектора типа
+        })
+
+    # 4. Объединяем списки
+    all_items = events + normalized_tasks
     
-    # Определяем тип для каждого события
-    for e in all_events:
+    # Сортируем всё по времени
+    all_items.sort(key=lambda x: x['start'].get('dateTime', x['start'].get('date')))
+
+    # 5. Определяем типы
+    for e in all_items:
         e['_type'] = detect_type(e)
 
-    # Группируем: Тип -> Дата -> Список
+    # 6. Группируем: Тип -> Дата -> Список
     grouped = {}
-    for e in all_events:
+    for e in all_items:
         date_key = e['start'].get('dateTime', e['start'].get('date'))[:10]
         grouped.setdefault(e['_type'], {}).setdefault(date_key, []).append(e)
 
-    # Плоский список для пагинации (строго по порядку типов)
+    # 7. Плоский список для пагинации
     flat_ordered = []
     for t in TYPE_ORDER:
         if t in grouped:
@@ -142,14 +173,13 @@ async def get_schedule(user_id, period="day", target_date=None, offset=0, limit=
     paginated = flat_ordered[offset:offset+limit]
     has_more = len(flat_ordered) > offset + limit
 
-    # Формируем текст
+    # 8. Формируем текст
     if not paginated:
-        text = "📭 Нет событий на этот период."
+        text = "📭 Нет событий и задач на этот период."
     else:
         period_label = {"day": "день", "week": "неделю", "month": "месяц"}[period]
         text = f"📋 Расписание на {period_label} ({format_date_range(period, start, end)}):\n\n"
         
-        # Перегруппировываем обрезанный список для вывода
         display_grouped = {}
         for e in paginated:
             date_key = e['start'].get('dateTime', e['start'].get('date'))[:10]

@@ -51,7 +51,7 @@ def fmt_evt(e):
     ds = e.get('description','')
     for ad in AUTO_DESC:
         if ds.lower().strip()==ad: ds=''
-        else: ds = TYPE_TAG_RE.sub('',ds).strip()
+    ds = TYPE_TAG_RE.sub('',ds).strip()
     ds = f" 💬 {ds[:30]}..." if len(ds)>30 else (f" 💬 {ds}" if ds else "")
     return f"⏰ {tr} — {tl}{lc}{ds}"
 
@@ -73,11 +73,18 @@ async def create_event(uid, data):
         ts = build('tasks','v1',credentials=cr)
         due = datetime.fromisoformat(data['start'])
         if due.tzinfo is None: due = tz.localize(due)
-        # Формат для Tasks API: 2026-04-06T16:05:00+03:00
+        # Отправляем в API время с явным часовым поясом: 2026-04-06T16:05:00+03:00
         due_str = due.strftime("%Y-%m-%dT%H:%M:%S%z")
-        due_str = due_str[:-2]+':'+due_str[-2:] if len(due_str)==25 and due_str[-5]in'+-' else due_str
+        # Форматируем таймзону как +03:00 вместо +0300
+        if len(due_str)==25 and due_str[-5] in '+-':
+            due_str = due_str[:-2]+':'+due_str[-2:]
         try:
-            ts.tasks().insert(tasklist='@default',body={'title':data['title'],'notes':data.get('description',''),'due':due_str,'status':'needsAction'}).execute()
+            ts.tasks().insert(tasklist='@default',body={
+                'title':data['title'],
+                'notes':data.get('description',''),
+                'due':due_str,
+                'status':'needsAction'
+            }).execute()
             return True,"✅ Задача создана!"
         except Exception as ex:
             logger.error(f"Tasks err: {ex}")
@@ -91,7 +98,15 @@ async def create_event(uid, data):
     desc = (data.get('description') or '').strip()
     tag = f"<!-- TG_TYPE:{data['type']} -->"
     desc = f"{desc}\n{tag}" if desc else tag
-    body = {'summary':data['title'],'description':desc,'location':data.get('location',''),'start':{'dateTime':to_iso(st),'timeZone':TZ_NAME},'end':{'dateTime':to_iso(en),'timeZone':TZ_NAME},'colorId':data.get('color'),'reminders':{'useDefault':False,'overrides':[{'method':'popup','minutes':15},{'method':'email','minutes':60}]}}
+    body = {
+        'summary':data['title'],
+        'description':desc,
+        'location':data.get('location',''),
+        'start':{'dateTime':to_iso(st),'timeZone':TZ_NAME},
+        'end':{'dateTime':to_iso(en),'timeZone':TZ_NAME},
+        'colorId':data.get('color'),
+        'reminders':{'useDefault':False,'overrides':[{'method':'popup','minutes':15},{'method':'email','minutes':60}]}
+    }
     try:
         ev = svc.events().insert(calendarId='primary',body=body).execute()
         return True,f"✅ Создано!\n{ev.get('htmlLink','')}"
@@ -120,15 +135,25 @@ async def get_schedule(uid, period="day", target=None, off=0, lim=20):
     
     items = []
     
-    # Calendar
+    # Calendar Events
     try:
         cal = build('calendar','v3',credentials=cr)
         for e in cal.events().list(calendarId='primary',timeMin=to_iso(st),timeMax=to_iso(en),singleEvents=True,orderBy='startTime').execute().get('items',[]):
             sdt = parse_dt(e.get('start'))
-            items.append({'summary':e.get('summary',''),'description':e.get('description',''),'location':e.get('location',''),'start':e.get('start',{}),'end':e.get('end',{}),'_task':False,'_disp':None,'_sdt':sdt,'_dk':sdt.strftime("%Y-%m-%d") if sdt else None})
+            items.append({
+                'summary':e.get('summary',''),
+                'description':e.get('description',''),
+                'location':e.get('location',''),
+                'start':e.get('start',{}),
+                'end':e.get('end',{}),
+                '_task':False,
+                '_disp':None,
+                '_sdt':sdt,
+                '_dk':sdt.strftime("%Y-%m-%d") if sdt else None
+            })
     except Exception as ex: logger.error(f"Cal API: {ex}")
     
-    # Tasks
+    # Tasks API
     try:
         ts = build('tasks','v1',credentials=cr)
         tmin = st.strftime("%Y-%m-%dT00:00:00%z").replace('+0000','+00:00')
@@ -136,29 +161,41 @@ async def get_schedule(uid, period="day", target=None, off=0, lim=20):
         for t in ts.tasks().list(tasklist='@default',dueMin=tmin,dueMax=tmax,showCompleted=False,showHidden=False).execute().get('items',[]):
             due = t.get('due')
             if not due: continue
-            # Парсим время: берём локальное время из строки
-            if 'T' in due:
-                # Формат: 2026-04-06T16:05:00+03:00
-                parts = due.replace('Z','+00:00').split('+')
-                dt_part = parts[0]
-                tz_part = '+'+parts[1] if len(parts)>1 and parts[1] else '+00:00'
-                # Парсим дату и время
-                date_t = dt_part.split('T')
-                if len(date_t)==2:
-                    date_p, time_p = date_t[0], date_t[1][:5]
-                    disp = time_p
-                    sdt = tz.localize(datetime.strptime(f"{date_p} {time_p}","%Y-%m-%d %H:%M"))
-                else:
-                    disp = "до конца дня"
-                    sdt = tz.localize(datetime.strptime(dt_part,"%Y-%m-%d").replace(hour=23,minute=59))
+            
+            # ✅ Парсим время дедлайна корректно
+            if due.endswith('Z'):
+                # UTC → локальное время
+                dt_utc = datetime.fromisoformat(due.replace('Z','+00:00'))
+                dt_local = dt_utc.astimezone(tz)
+                disp = dt_local.strftime("%H:%M")
+                sdt = dt_local
+            elif '+' in due or (due.count('-') > 2):
+                # Уже с часовым поясом: 2026-04-06T16:05:00+03:00
+                # Извлекаем время напрямую
+                time_part = due.split('T')[1][:5] if 'T' in due else "00:00"
+                date_part = due.split('T')[0] if 'T' in due else due[:10]
+                disp = time_part
+                sdt = tz.localize(datetime.strptime(f"{date_part} {time_part}","%Y-%m-%d %H:%M"))
             else:
+                # Только дата
                 disp = "до конца дня"
                 sdt = tz.localize(datetime.strptime(due,"%Y-%m-%d").replace(hour=23,minute=59))
             
             if sdt < st or sdt > en: continue
-            items.append({'summary':t['title'],'description':t.get('notes',''),'location':'','start':{'dateTime':due},'end':{'dateTime':due},'_task':True,'_disp':disp,'_sdt':sdt,'_dk':sdt.strftime("%Y-%m-%d")})
+            items.append({
+                'summary':t['title'],
+                'description':t.get('notes',''),
+                'location':'',
+                'start':{'dateTime':due},
+                'end':{'dateTime':due},
+                '_task':True,
+                '_disp':disp,  # ✅ Преформатированное время для отображения
+                '_sdt':sdt,
+                '_dk':sdt.strftime("%Y-%m-%d")
+            })
     except Exception as ex: logger.error(f"Tasks API: {ex}")
     
+    # Сортируем и группируем
     items.sort(key=lambda x: x.get('_sdt') or datetime.max.replace(tzinfo=tz))
     for it in items: it['_typ'] = detect_typ(it)
     

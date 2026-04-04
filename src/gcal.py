@@ -57,17 +57,27 @@ def format_date_range(period, start, end):
     return s if period == "day" else f"{s}–{e}"
 
 def detect_type(e):
+    # 1. Если это задача из Tasks API
     if e.get('_is_native_task'):
         return 'task'
+    
     desc = (e.get('description') or '').lower()
     title = (e.get('summary') or '').lower()
+    
+    # 2. Ищем тег в описании
     m = TYPE_TAG_RE.search(e.get('description') or '')
     if m:
         return m.group(1).lower()
+    
+    # 3. Эвристика: участники = встреча
     if e.get('attendees'):
         return 'meeting'
+    
+    # 4. Эвристика: ключевые слова = задача
     if any(kw in f"{title} {desc}" for kw in TASK_KEYWORDS):
         return 'task'
+    
+    # 5. По умолчанию = мероприятие
     return 'event'
 
 def clean_description(desc):
@@ -108,13 +118,12 @@ async def create_event(user_id, event_data):
     if not creds:
         return False, "❌ Сначала подключи Google командой /connect"
 
-    # Если тип задача -> используем Tasks API
+    # Если задача -> Tasks API
     if event_data.get('type') == 'task':
         tasks_service = build('tasks', 'v1', credentials=creds)
         due_dt = datetime.fromisoformat(event_data['start'])
         if due_dt.tzinfo is None:
             due_dt = tz.localize(due_dt)
-        # Google Tasks требует UTC для времени
         due_utc = due_dt.astimezone(pytz.UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         
         task_body = {
@@ -130,7 +139,7 @@ async def create_event(user_id, event_data):
             logger.error(f"Tasks API error: {e}")
             return False, f"❌ Ошибка создания задачи: {str(e)}"
 
-    # Для встреч и мероприятий -> Calendar API
+    # Встречи/мероприятия -> Calendar API
     service = build('calendar', 'v3', credentials=creds)
     start_dt = datetime.fromisoformat(event_data['start'])
     end_dt = datetime.fromisoformat(event_data['end'])
@@ -222,7 +231,6 @@ async def get_schedule(user_id, period="day", target_date=None, offset=0, limit=
             if not due_str:
                 continue
             
-            # Парсим дедлайн
             if 'T' in due_str:
                 dt_utc = datetime.fromisoformat(due_str.replace('Z', '+00:00'))
                 dt_local = dt_utc.astimezone(tz)
@@ -231,7 +239,6 @@ async def get_schedule(user_id, period="day", target_date=None, offset=0, limit=
                 dt_local = tz.localize(datetime.strptime(due_str, "%Y-%m-%d").replace(hour=23, minute=59))
                 display_time = "до конца дня"
             
-            # Фильтруем по периоду
             if dt_local < start or dt_local > end:
                 continue
 
@@ -252,13 +259,21 @@ async def get_schedule(user_id, period="day", target_date=None, offset=0, limit=
     # Сортируем по времени
     all_items.sort(key=lambda x: x.get('_sort_dt') or datetime.max.replace(tzinfo=tz))
 
-    # Группируем
+    # ✅ Определяем типы (ОБЯЗАТЕЛЬНО перед группировкой)
+    for e in all_items:
+        e['_type'] = detect_type(e)
+
+    # ✅ Группируем: Тип -> Дата -> Список (используем .get() для безопасности)
     grouped = {}
     for e in all_items:
         dk = e.get('_date_key')
-        if not dk: continue
-        grouped.setdefault(e['_type'], {}).setdefault(dk, []).append(e)
+        if not dk: 
+            continue
+        # ✅ ИСПРАВЛЕНО: используем .get() с дефолтом, чтобы не было KeyError
+        t_type = e.get('_type', 'event')
+        grouped.setdefault(t_type, {}).setdefault(dk, []).append(e)
 
+    # Плоский список для пагинации
     flat_ordered = []
     for t in TYPE_ORDER:
         if t in grouped:
@@ -277,8 +292,10 @@ async def get_schedule(user_id, period="day", target_date=None, offset=0, limit=
         display_grouped = {}
         for e in paginated:
             dk = e.get('_date_key')
-            if not dk: continue
-            display_grouped.setdefault(e['_type'], {}).setdefault(dk, []).append(e)
+            if not dk: 
+                continue
+            t_type = e.get('_type', 'event')
+            display_grouped.setdefault(t_type, {}).setdefault(dk, []).append(e)
 
         for t in TYPE_ORDER:
             if t in display_grouped:

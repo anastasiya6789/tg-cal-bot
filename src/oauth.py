@@ -1,66 +1,82 @@
-from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 import os
+import urllib.parse
+import requests
 from db import get_token, save_token
 
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 REDIRECT_URI = os.getenv('REDIRECT_URI')
 CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
 CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')
-
-CLIENT_CONFIG = {
-    "web": {
-        "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET,
-        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-        "token_uri": "https://oauth2.googleapis.com/token",
-        "redirect_uris": [REDIRECT_URI],
-        "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs"
-    }
-}
+TOKEN_URI = 'https://oauth2.googleapis.com/token'
+AUTH_URI = 'https://accounts.google.com/o/oauth2/auth'
 
 def get_auth_url(state):
-    # use_pkce=False для веб-приложений с редиректом
-    flow = Flow.from_client_config(CLIENT_CONFIG, scopes=SCOPES)
-    flow.redirect_uri = REDIRECT_URI
-    auth_url, _ = flow.authorization_url(
-        access_type='offline',
-        prompt='consent',
-        state=state,
-        include_granted_scopes='true'
-    )
-    return auth_url
+    """Генерируем ссылку для авторизации"""
+    params = {
+        'client_id': CLIENT_ID,
+        'redirect_uri': REDIRECT_URI,
+        'response_type': 'code',
+        'scope': ' '.join(SCOPES),
+        'state': state,
+        'access_type': 'offline',  # чтобы получить refresh_token
+        'prompt': 'consent',       # чтобы гарантированно получить refresh_token
+    }
+    return f"{AUTH_URI}?{urllib.parse.urlencode(params)}"
 
 async def handle_callback(code, state, user_id):
-    flow = Flow.from_client_config(CLIENT_CONFIG, scopes=SCOPES)
-    flow.redirect_uri = REDIRECT_URI
-    # Важно: use_pkce=False, чтобы не требовался code_verifier
-    flow.fetch_token(code=code, use_pkce=False)
-    creds = flow.credentials
+    """Обрабатываем callback от Google и получаем токены"""
+    # Ручной обмен code на токены (без Flow, без PKCE)
+    data = {
+        'code': code,
+        'client_id': CLIENT_ID,
+        'client_secret': CLIENT_SECRET,
+        'redirect_uri': REDIRECT_URI,
+        'grant_type': 'authorization_code',
+    }
+    response = requests.post(TOKEN_URI, data=data)
+    response.raise_for_status()
+    result = response.json()
     
-    # Вычисляем expires_in вручную
-    from datetime import datetime, timezone
-    expires_in = 3600
-    if creds.expiry:
-        expires_in = max(0, int((creds.expiry - datetime.now(timezone.utc)).total_seconds()))
+    access_token = result.get('access_token')
+    refresh_token = result.get('refresh_token')  # придёт только при первом подключении!
+    expires_in = result.get('expires_in', 3600)
     
-    await save_token(user_id, creds.token, creds.refresh_token, expires_in)
-    return creds
+    if not access_token:
+        raise ValueError("No access token in response")
+    
+    await save_token(user_id, access_token, refresh_token, expires_in)
+    
+    return Credentials(
+        token=access_token,
+        refresh_token=refresh_token,
+        token_uri=TOKEN_URI,
+        client_id=CLIENT_ID,
+        client_secret=CLIENT_SECRET,
+        scopes=SCOPES,
+    )
 
 async def get_credentials(user_id):
+    """Получаем валидные креды из БД, делаем рефреш если нужно"""
     token_data = await get_token(user_id)
     if not token_data:
         return None
+    
     acc, ref = token_data
     creds = Credentials(
-        token=acc, refresh_token=ref,
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=CLIENT_ID, client_secret=CLIENT_SECRET,
-        scopes=SCOPES
+        token=acc,
+        refresh_token=ref,
+        token_uri=TOKEN_URI,
+        client_id=CLIENT_ID,
+        client_secret=CLIENT_SECRET,
+        scopes=SCOPES,
     )
+    
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
         from datetime import datetime, timezone
         expires_in = max(0, int((creds.expiry - datetime.now(timezone.utc)).total_seconds()))
         await save_token(user_id, creds.token, creds.refresh_token, expires_in)
+    
     return creds

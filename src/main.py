@@ -2,6 +2,7 @@ import pytz
 import os
 import logging
 import secrets
+import traceback
 from datetime import datetime, timedelta
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
@@ -14,7 +15,9 @@ from db import init_db
 from oauth import get_auth_url, handle_callback
 from gcal import create_event, get_schedule
 
-logging.basicConfig(level=logging.INFO)
+# Включаем подробные логи для отладки
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_BASE_URL")
@@ -23,6 +26,13 @@ tz = pytz.timezone(TZ_NAME)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+# ================= ERROR HANDLER (показывает реальные ошибки) =================
+@dp.errors()
+async def errors_handler(update: types.Update, exception: Exception):
+    logger.error(f"❌ Ошибка в обновлении {update.update_id}: {exception}")
+    logger.error(traceback.format_exc())
+    return True  # не падать, а продолжать работу
 
 # ================= FSM STATES =================
 class ScheduleFSM(StatesGroup):
@@ -48,6 +58,17 @@ async def cmd_start(message: types.Message):
         [InlineKeyboardButton(text="🔗 Подключить Google", callback_data="connect")]
     ])
     await message.answer("👋 Привет! Я твой помощник по расписанию.\n\n🔧 Команды:\n/start — Меню\n/create — Создать\n/schedule — Расписание", reply_markup=kb)
+
+# ✅ Хендлер для кнопки "🏠 Меню" (раньше его не было!)
+@dp.callback_query(F.data == "start")
+async def back_to_menu(callback: types.CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Создать событие", callback_data="create")],
+        [InlineKeyboardButton(text="📅 Моё расписание", callback_data="schedule")],
+        [InlineKeyboardButton(text="🔗 Подключить Google", callback_data="connect")]
+    ])
+    await callback.message.edit_text("👋 Главное меню:", reply_markup=kb)
+    await callback.answer()
 
 # ================= CONNECT GOOGLE =================
 @dp.message(Command("connect"))
@@ -235,72 +256,87 @@ async def cancel_creation(callback: types.CallbackQuery, state: FSMContext):
 
 # ================= SCHEDULE VIEW =================
 async def show_schedule_view(message_or_cb, user_id, period, date_str, offset=0):
-    # ✅ Распаковываем 4 значения
-    success, text, has_more, _ = await get_schedule(user_id, period, date_str, offset)
-    if not success:
-        await (message_or_cb.message.edit_text(text) if hasattr(message_or_cb, 'message') else message_or_cb.answer(text))
-        return
+    try:
+        success, text, has_more, _ = await get_schedule(user_id, period, date_str, offset)
+        if not success:
+            await (message_or_cb.message.edit_text(text) if hasattr(message_or_cb, 'message') else message_or_cb.answer(text))
+            return
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"sched_{period}_{date_str}_{offset}_prev"),
-         InlineKeyboardButton(text="➡️ Вперёд", callback_data=f"sched_{period}_{date_str}_{offset}_next")],
-        [InlineKeyboardButton(text="📅 Другая дата", callback_data="sched_custom"),
-         InlineKeyboardButton(text="🔄 Обновить", callback_data=f"sched_{period}_{date_str}_0")],
-        [InlineKeyboardButton(text="🏠 Меню", callback_data="start")]
-    ])
-    if has_more:
-        kb.inline_keyboard.append([InlineKeyboardButton(text="📄 Ещё события", callback_data=f"sched_{period}_{date_str}_{offset+8}")])
-    
-    response = message_or_cb.message if hasattr(message_or_cb, 'message') else message_or_cb
-    await response.edit_text(text, reply_markup=kb)
-    if hasattr(message_or_cb, 'answer'): await message_or_cb.answer()
+        # ✅ Используем "|" как разделитель вместо "_" чтобы даты не ломались
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"sched|{period}|{date_str}|{offset}|prev"),
+             InlineKeyboardButton(text="➡️ Вперёд", callback_data=f"sched|{period}|{date_str}|{offset}|next")],
+            [InlineKeyboardButton(text="📅 Другая дата", callback_data="sched_custom"),
+             InlineKeyboardButton(text="🔄 Обновить", callback_data=f"sched|{period}|{date_str}|0|refresh")],
+            [InlineKeyboardButton(text="🏠 Меню", callback_data="start")]
+        ])
+        if has_more:
+            kb.inline_keyboard.append([InlineKeyboardButton(text="📄 Ещё события", callback_data=f"sched|{period}|{date_str}|{offset+8}|more")])
+        
+        response = message_or_cb.message if hasattr(message_or_cb, 'message') else message_or_cb
+        await response.edit_text(text, reply_markup=kb)
+        if hasattr(message_or_cb, 'answer'): await message_or_cb.answer()
+    except Exception as e:
+        logger.error(f"Ошибка в show_schedule_view: {e}\n{traceback.format_exc()}")
+        await (message_or_cb.message.edit_text("❌ Ошибка загрузки расписания") if hasattr(message_or_cb, 'message') else message_or_cb.answer("❌ Ошибка"))
 
 @dp.message(Command("schedule"))
 @dp.callback_query(F.data == "schedule")
 async def cmd_schedule(message_or_cb: types.Message | types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📆 День", callback_data="sched_day"),
-         InlineKeyboardButton(text="🗓 Неделя", callback_data="sched_week"),
-         InlineKeyboardButton(text="📅 Месяц", callback_data="sched_month")]
+        [InlineKeyboardButton(text="📆 День", callback_data="sched_init|day"),
+         InlineKeyboardButton(text="🗓 Неделя", callback_data="sched_init|week"),
+         InlineKeyboardButton(text="📅 Месяц", callback_data="sched_init|month")]
     ])
     response = message_or_cb.message if hasattr(message_or_cb, 'message') else message_or_cb
     await response.answer("Выберите период:", reply_markup=kb)
     if hasattr(message_or_cb, 'answer'): await message_or_cb.answer()
 
-@dp.callback_query(F.data.in_({"sched_day", "sched_week", "sched_month"}))
+@dp.callback_query(F.data.startswith("sched_init|"))
 async def init_schedule(callback: types.CallbackQuery):
-    period = callback.data.split("_")[1]
+    period = callback.data.split("|")[1]
     today = datetime.now().strftime("%Y-%m-%d")
     await show_schedule_view(callback, callback.from_user.id, period, today, 0)
+    await callback.answer()
 
-@dp.callback_query(F.data.startswith("sched_") & ~F.data.in_({"sched_day", "sched_week", "sched_month", "sched_custom"}))
+@dp.callback_query(F.data.startswith("sched|"))
 async def navigate_schedule(callback: types.CallbackQuery):
-    parts = callback.data.split("_")
-    period = parts[1]
-    date_str = parts[2]
-    offset = int(parts[3])
-    direction = parts[4] if len(parts) > 4 else None
-
-    base_dt = datetime.strptime(date_str, "%Y-%m-%d")
-    if direction == "next":
-        if period == "day": base_dt += timedelta(days=1)
-        elif period == "week": base_dt += timedelta(days=7)
-        elif period == "month":
-            m = base_dt.month + 1
-            y = base_dt.year
-            if m > 12: m, y = 1, y + 1
-            base_dt = base_dt.replace(year=y, month=m, day=1)
-    elif direction == "prev":
-        if period == "day": base_dt -= timedelta(days=1)
-        elif period == "week": base_dt -= timedelta(days=7)
-        elif period == "month":
-            m = base_dt.month - 1
-            y = base_dt.year
-            if m < 1: m, y = 12, y - 1
-            base_dt = base_dt.replace(year=y, month=m, day=1)
-
-    # ✅ Сбрасываем offset при навигации между периодами
-    await show_schedule_view(callback, callback.from_user.id, period, base_dt.strftime("%Y-%m-%d"), 0)
+    try:
+        # ✅ Парсим через "|" — надёжно даже с датами
+        _, period, date_str, offset_str, action = callback.data.split("|")
+        offset = int(offset_str)
+        
+        base_dt = datetime.strptime(date_str, "%Y-%m-%d")
+        if action in ("next", "prev"):
+            if action == "next":
+                if period == "day": base_dt += timedelta(days=1)
+                elif period == "week": base_dt += timedelta(days=7)
+                elif period == "month":
+                    m = base_dt.month + 1
+                    y = base_dt.year
+                    if m > 12: m, y = 1, y + 1
+                    base_dt = base_dt.replace(year=y, month=m, day=1)
+            else:  # prev
+                if period == "day": base_dt -= timedelta(days=1)
+                elif period == "week": base_dt -= timedelta(days=7)
+                elif period == "month":
+                    m = base_dt.month - 1
+                    y = base_dt.year
+                    if m < 1: m, y = 12, y - 1
+                    base_dt = base_dt.replace(year=y, month=m, day=1)
+            # При смене периода сбрасываем пагинацию
+            await show_schedule_view(callback, callback.from_user.id, period, base_dt.strftime("%Y-%m-%d"), 0)
+        elif action == "more":
+            # Показываем следующую порцию событий
+            await show_schedule_view(callback, callback.from_user.id, period, date_str, offset)
+        elif action == "refresh":
+            # Просто обновляем
+            await show_schedule_view(callback, callback.from_user.id, period, date_str, 0)
+        
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"Ошибка в navigate_schedule: {e}\n{traceback.format_exc()}")
+        await callback.answer("❌ Ошибка навигации", show_alert=True)
 
 # ================= CUSTOM DATE FSM =================
 @dp.callback_query(F.data == "sched_custom")
@@ -322,7 +358,8 @@ async def handle_custom_date(message: types.Message, state: FSMContext):
 
 @dp.message(ScheduleFSM.waiting_custom_date)
 async def invalid_custom_date(message: types.Message, state: FSMContext):
-    await message.answer("❌ Неверный формат. Введите `15.04.2026` или нажмите /skip")
+    if message.text.lower() not in ["/skip", "отмена", "назад"]:
+        await message.answer("❌ Неверный формат. Введите `15.04.2026` или нажмите /skip")
 
 @dp.callback_query(F.data == "schedule", StateFilter(ScheduleFSM.waiting_custom_date))
 @dp.message(F.text.lower() == "/skip", StateFilter(ScheduleFSM.waiting_custom_date))
@@ -343,15 +380,18 @@ async def gcal_callback(request):
         await handle_callback(code, state, user_id)
         await bot.send_message(user_id, "✅ Google аккаунт подключён!")
     except Exception as e:
+        logger.error(f"OAuth error: {e}\n{traceback.format_exc()}")
         await bot.send_message(user_id, f"❌ Ошибка: {e}")
     return web.HTTPFound(f"https://t.me/{bot.me.username}")
 
 async def on_startup(app):
     await bot.set_webhook(f"{WEBHOOK_URL}/webhook")
+    logger.info(f"✅ Webhook установлен: {WEBHOOK_URL}/webhook")
 
 def main():
     import asyncio
     asyncio.run(init_db())
+    logger.info("✅ База данных инициализирована")
 
     app = web.Application()
     webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
@@ -360,6 +400,7 @@ def main():
     app.on_startup.append(on_startup)
     app.router.add_get("/gcal/callback", gcal_callback)
 
+    logger.info(f"🚀 Запуск бота на порту {os.getenv('PORT', 8080)}")
     web.run_app(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
 
 if __name__ == "__main__":

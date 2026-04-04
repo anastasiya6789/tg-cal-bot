@@ -7,7 +7,6 @@ logger = logging.getLogger(__name__)
 TZ_NAME = os.getenv("TIMEZONE", "Europe/Moscow")
 tz = pytz.timezone(TZ_NAME)
 
-# ✅ Теперь ищем task тоже
 TYPE_TAG_RE = re.compile(r'<!--\s*TG_TYPE:\s*(meeting|event|task)\s*-->', re.I)
 TASK_KEYS = ['дедлайн','deadline','задача','сделать','подготовить','лаба','реферат','отчет','дз']
 TYPE_EMOJI = {'meeting':'📅 Встречи','task':'✅ Задачи','event':'🎯 Мероприятия'}
@@ -57,15 +56,15 @@ def fmt_evt(e):
     return f"⏰ {tr} — {tl}{lc}{ds}"
 
 def detect_typ(e):
-    # ✅ Сначала проверяем тег в описании
+    # ✅ Сначала проверяем тег в описании (для задач из Calendar)
     dsc = (e.get('description') or '')
     m = TYPE_TAG_RE.search(dsc)
     if m: return m.group(1).lower()
     
-    # ✅ Затем проверяем флажок (для новых задач)
+    # ✅ Затем проверяем флажок (для задач из Tasks API)
     if e.get('_task'): return 'task'
     
-    # ✅ Авто-определение по ключевым словам (если нет тега)
+    # ✅ Авто-определение по ключевым словам
     dsc_lower = dsc.lower()
     ttl = (e.get('summary') or '').lower()
     if e.get('attendees'): return 'meeting'
@@ -76,7 +75,7 @@ async def create_event(uid, data):
     cr = await get_credentials(uid)
     if not cr: return False,"❌ Сначала подключи Google командой /connect"
     
-    # ✅ ВСЕ типы событий (включая task) создаются через Calendar API
+    # ✅ ВСЕ типы событий создаются через Calendar API (включая task)
     svc = build('calendar','v3',credentials=cr)
     
     st = datetime.fromisoformat(data['start'])
@@ -85,7 +84,6 @@ async def create_event(uid, data):
     if en.tzinfo is None: en = tz.localize(en)
     
     desc = (data.get('description') or '').strip()
-    # ✅ Добавляем тег типа для последующей идентификации
     tag = f"<!-- TG_TYPE:{data['type']} -->"
     desc = f"{desc}\n{tag}" if desc else tag
     
@@ -126,7 +124,7 @@ async def get_schedule(uid, period="day", target=None, off=0, lim=20):
     
     items = []
     
-    # ✅ Запрашиваем события из Календаря (теперь и задачи тоже там)
+    # ✅ 1. Читаем события из Calendar API
     try:
         cal = build('calendar','v3',credentials=cr)
         for e in cal.events().list(calendarId='primary',timeMin=to_iso(st),timeMax=to_iso(en),singleEvents=True,orderBy='startTime').execute().get('items',[]):
@@ -137,14 +135,61 @@ async def get_schedule(uid, period="day", target=None, off=0, lim=20):
                 'location':e.get('location',''),
                 'start':e.get('start',{}),
                 'end':e.get('end',{}),
-                '_task':False,  # теперь определяется по тегу
+                '_task':False,
                 '_disp':None,
                 '_sdt':sdt,
                 '_dk':sdt.strftime("%Y-%m-%d") if sdt else None
             })
     except Exception as ex: logger.error(f"Cal API: {ex}")
     
-    # ❌ Tasks API больше не нужен — удалили этот блок
+    # ✅ 2. Читаем задачи из Tasks API (старые задачи)
+    try:
+        ts = build('tasks','v1',credentials=cr)
+        tmin = st.astimezone(pytz.UTC).strftime("%Y-%m-%dT00:00:00Z")
+        tmax = en.astimezone(pytz.UTC).strftime("%Y-%m-%dT23:59:59Z")
+        
+        tasks_list = ts.tasks().list(tasklist='@default',dueMin=tmin,dueMax=tmax,showCompleted=False,showHidden=False).execute()
+        for t in tasks_list.get('items',[]):
+            due = t.get('due')
+            if not due: continue
+            
+            try:
+                if due.endswith('Z'):
+                    dt_utc = datetime.fromisoformat(due.replace('Z', '+00:00'))
+                else:
+                    dt_utc = datetime.fromisoformat(due)
+                
+                dt_local = dt_utc.astimezone(tz)
+                
+                if 'T' in due and len(due) > 10:
+                    disp = dt_local.strftime("%H:%M")
+                else:
+                    disp = "весь день"
+                
+                sdt = dt_local
+            except Exception as e:
+                logger.warning(f"Failed to parse task due '{due}': {e}")
+                try:
+                    sdt = tz.localize(datetime.strptime(due[:10],"%Y-%m-%d").replace(hour=23,minute=59))
+                    disp = "весь день"
+                except:
+                    continue
+            
+            if sdt < st or sdt > en: continue
+            
+            items.append({
+                'summary':t['title'],
+                'description':t.get('notes',''),
+                'location':'',
+                'start':{'dateTime':due},
+                'end':{'dateTime':due},
+                '_task':True,  # ✅ Помечаем как задача из Tasks API
+                '_disp':disp,
+                '_sdt':sdt,
+                '_dk':sdt.strftime("%Y-%m-%d")
+            })
+    except Exception as ex: 
+        logger.error(f"Tasks API: {ex}")
     
     # Сортируем и группируем
     items.sort(key=lambda x: x.get('_sdt') or datetime.max.replace(tzinfo=tz))

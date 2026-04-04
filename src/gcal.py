@@ -65,7 +65,7 @@ def detect_typ(e):
     if any(k in f"{ttl} {dsc}" for k in TASK_KEYS): return 'task'
     return 'event'
 
-async def create_evt(uid, data):
+async def create_event(uid, data):
     cr = await get_credentials(uid)
     if not cr: return False,"❌ Сначала подключи Google командой /connect"
     
@@ -99,7 +99,7 @@ async def create_evt(uid, data):
         logger.error(f"Cal err: {ex}")
         return False,f"❌ Ошибка: {ex}"
 
-async def get_sched(uid, period="day", target=None, off=0, lim=20):
+async def get_schedule(uid, period="day", target=None, off=0, lim=20):
     cr = await get_credentials(uid)
     if not cr: return False,"❌ Сначала подключи Google",False,None
     

@@ -1,3 +1,4 @@
+import pytz
 import os
 import logging
 import secrets
@@ -12,6 +13,8 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from db import init_db
 from oauth import get_auth_url, handle_callback
 from gcal import create_event, get_schedule
+TZ_NAME = os.getenv("TIMEZONE", "Europe/Moscow")
+tz = pytz.timezone(TZ_NAME)  # <-- добавь эту строку после импортов
 
 logging.basicConfig(level=logging.INFO)
 
@@ -301,6 +304,8 @@ async def ask_custom_date(callback: types.CallbackQuery):
 async def handle_custom_date(message: types.Message):
     try:
         dt = datetime.strptime(message.text, "%d.%m.%Y")
+        # Локализуем дату в нужный таймзону
+        dt = tz.localize(dt.replace(hour=12, minute=0, second=0))
         await show_schedule_view(message, message.from_user.id, "day", dt.strftime("%Y-%m-%d"), 0)
     except ValueError:
         await message.answer("❌ Неверный формат даты. Пример: `15.04.2026`")

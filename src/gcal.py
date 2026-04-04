@@ -5,6 +5,13 @@ import pytz
 import os
 
 TZ_NAME = os.getenv("TIMEZONE", "Europe/Moscow")
+tz = pytz.timezone(TZ_NAME)
+
+def to_iso(dt: datetime) -> str:
+    """Конвертирует datetime в ISO 8601 с timezone для Google API"""
+    if dt.tzinfo is None:
+        dt = tz.localize(dt)
+    return dt.isoformat()
 
 async def create_event(user_id, event_data):
     creds = await get_credentials(user_id)
@@ -13,12 +20,20 @@ async def create_event(user_id, event_data):
 
     service = build('calendar', 'v3', credentials=creds)
 
+    # Парсим start/end из строк в datetime с таймзоной
+    start_dt = datetime.fromisoformat(event_data['start'])
+    end_dt = datetime.fromisoformat(event_data['end'])
+    if start_dt.tzinfo is None:
+        start_dt = tz.localize(start_dt)
+    if end_dt.tzinfo is None:
+        end_dt = tz.localize(end_dt)
+
     body = {
         'summary': event_data['title'],
         'description': event_data.get('description', ''),
         'location': event_data.get('location', ''),
-        'start': {'dateTime': event_data['start'], 'timeZone': TZ_NAME},
-        'end': {'dateTime': event_data['end'], 'timeZone': TZ_NAME},
+        'start': {'dateTime': to_iso(start_dt), 'timeZone': TZ_NAME},
+        'end': {'dateTime': to_iso(end_dt), 'timeZone': TZ_NAME},
         'colorId': event_data.get('color'),
         'reminders': {
             'useDefault': False,
@@ -44,12 +59,17 @@ async def get_schedule(user_id, period="day", target_date=None, offset=0, limit=
     if not creds:
         return False, "❌ Сначала подключи Google", False
 
-    tz = pytz.timezone(TZ_NAME)
-    base_dt = datetime.strptime(target_date, "%Y-%m-%d") if target_date else datetime.now(tz)
+    # Базовая дата с таймзоной
+    if target_date:
+        base_dt = datetime.strptime(target_date, "%Y-%m-%d")
+        base_dt = tz.localize(base_dt.replace(hour=12, minute=0, second=0))  # середина дня
+    else:
+        base_dt = datetime.now(tz)
 
+    # Вычисляем границы периода
     if period == "day":
         start = base_dt.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = start.replace(hour=23, minute=59, second=59, microsecond=0)
+        end = base_dt.replace(hour=23, minute=59, second=59, microsecond=0)
     elif period == "week":
         start = base_dt - timedelta(days=base_dt.weekday())
         start = start.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -60,14 +80,23 @@ async def get_schedule(user_id, period="day", target_date=None, offset=0, limit=
             end = start.replace(year=base_dt.year+1, month=1, day=1, microsecond=0) - timedelta(seconds=1)
         else:
             end = start.replace(month=base_dt.month+1, day=1, microsecond=0) - timedelta(seconds=1)
+    else:
+        return False, "❌ Неизвестный период", False
 
     service = build('calendar', 'v3', credentials=creds)
-    events_result = service.events().list(
-        calendarId='primary', timeMin=start.isoformat(),
-        timeMax=end.isoformat(), singleEvents=True, orderBy='startTime'
-    ).execute()
-    all_events = events_result.get('items', [])
+    
+    try:
+        events_result = service.events().list(
+            calendarId='primary',
+            timeMin=to_iso(start),
+            timeMax=to_iso(end),
+            singleEvents=True,
+            orderBy='startTime'
+        ).execute()
+    except Exception as e:
+        return False, f"❌ Ошибка API: {str(e)}", False
 
+    all_events = events_result.get('items', [])
     paginated = all_events[offset:offset+limit]
     has_more = len(all_events) > offset + limit
 

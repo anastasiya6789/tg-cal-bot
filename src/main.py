@@ -5,7 +5,7 @@ import secrets
 from datetime import datetime, timedelta
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -13,17 +13,20 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from db import init_db
 from oauth import get_auth_url, handle_callback
 from gcal import create_event, get_schedule
-TZ_NAME = os.getenv("TIMEZONE", "Europe/Moscow")
-tz = pytz.timezone(TZ_NAME)  # <-- добавь эту строку после импортов
 
 logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_BASE_URL")
 TZ_NAME = os.getenv("TIMEZONE", "Europe/Moscow")
+tz = pytz.timezone(TZ_NAME)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+# ================= FSM STATES =================
+class ScheduleFSM(StatesGroup):
+    waiting_custom_date = State()
 
 class EventCreation(StatesGroup):
     choosing_type = State()
@@ -36,6 +39,7 @@ class EventCreation(StatesGroup):
     setting_deadline = State()
     confirming = State()
 
+# ================= MAIN MENU =================
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -45,6 +49,7 @@ async def cmd_start(message: types.Message):
     ])
     await message.answer("👋 Привет! Я твой помощник по расписанию.\n\n🔧 Команды:\n/start — Меню\n/create — Создать\n/schedule — Расписание\n/connect — Google аккаунт", reply_markup=kb)
 
+# ================= CONNECT GOOGLE =================
 @dp.message(Command("connect"))
 @dp.callback_query(F.data == "connect")
 async def cmd_connect(message_or_cb: types.Message | types.CallbackQuery):
@@ -53,9 +58,10 @@ async def cmd_connect(message_or_cb: types.Message | types.CallbackQuery):
     url = get_auth_url(state)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔐 Авторизовать Google", url=url)]])
     response = message_or_cb.message if hasattr(message_or_cb, 'message') else message_or_cb
-    await response.answer("🔐 Нажми кнопку, чтобы разрешить доступ к к Calender:", reply_markup=kb)
+    await response.answer("🔐 Нажми кнопку, чтобы разрешить доступ к календарю:", reply_markup=kb)
     if hasattr(message_or_cb, 'answer'): await message_or_cb.answer()
 
+# ================= CREATE EVENT FSM =================
 @dp.message(Command("create"))
 @dp.callback_query(F.data == "create")
 async def start_creation(message_or_cb: types.Message | types.CallbackQuery, state: FSMContext):
@@ -88,7 +94,7 @@ async def set_start(message: types.Message, state: FSMContext):
             await message.answer("❌ Неверный формат. Пример: `10.04 14:00`")
             return
     await state.update_data(start=dt.isoformat())
-    await message.answer(" Введите дату и время ОКОНЧАНИЯ: `ДД.ММ ЧЧ:ММ`")
+    await message.answer("📅 Введите дату и время ОКОНЧАНИЯ: `ДД.ММ ЧЧ:ММ`")
     await state.set_state(EventCreation.setting_end)
 
 @dp.message(EventCreation.setting_end)
@@ -227,14 +233,14 @@ async def cancel_creation(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text("❌ Создание отменено. Введите `/create` чтобы начать заново.")
     await callback.answer()
 
-# ================= РАСПИСАНИЕ =================
+# ================= SCHEDULE VIEW =================
 async def show_schedule_view(message_or_cb, user_id, period, date_str, offset=0):
-    success, text, has_more = await get_schedule(user_id, period, date_str, offset)
+    # ✅ Исправлено: распаковываем 4 значения (добавлен период данных)
+    success, text, has_more, _ = await get_schedule(user_id, period, date_str, offset)
     if not success:
         await (message_or_cb.message.edit_text(text) if hasattr(message_or_cb, 'message') else message_or_cb.answer(text))
         return
 
-    dt = datetime.strptime(date_str, "%Y-%m-%d")
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"sched_{period}_{date_str}_{offset}_prev"),
          InlineKeyboardButton(text="➡️ Вперёд", callback_data=f"sched_{period}_{date_str}_{offset}_next")],
@@ -244,7 +250,7 @@ async def show_schedule_view(message_or_cb, user_id, period, date_str, offset=0)
     ])
     if has_more:
         kb.inline_keyboard.append([InlineKeyboardButton(text="📄 Ещё события", callback_data=f"sched_{period}_{date_str}_{offset+8}")])
-
+    
     response = message_or_cb.message if hasattr(message_or_cb, 'message') else message_or_cb
     await response.edit_text(text, reply_markup=kb)
     if hasattr(message_or_cb, 'answer'): await message_or_cb.answer()
@@ -293,23 +299,40 @@ async def navigate_schedule(callback: types.CallbackQuery):
             if m < 1: m, y = 12, y - 1
             base_dt = base_dt.replace(year=y, month=m, day=1)
 
-    await show_schedule_view(callback, callback.from_user.id, period, base_dt.strftime("%Y-%m-%d"), offset)
+    await show_schedule_view(callback, callback.from_user.id, period, base_dt.strftime("%Y-%m-%d"), 0)  # ✅ Сброс оффсета при навигации
 
+# ================= CUSTOM DATE FSM =================
 @dp.callback_query(F.data == "sched_custom")
-async def ask_custom_date(callback: types.CallbackQuery):
-    await callback.message.edit_text("📅 Введите дату в формате `ДД.ММ.ГГГГ` (например: `15.04.2026`):")
+async def ask_custom_date(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(ScheduleFSM.waiting_custom_date)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="schedule")]])
+    await callback.message.edit_text("📅 Введите дату в формате `ДД.ММ.ГГГГ` (например: `15.04.2026`):", reply_markup=kb)
     await callback.answer()
 
-@dp.message(F.text.regexp(r"^\d{2}\.\d{2}\.\d{4}$"))
-async def handle_custom_date(message: types.Message):
+@dp.message(ScheduleFSM.waiting_custom_date, F.text.regexp(r"^\d{2}\.\d{2}\.\d{4}$"))
+async def handle_custom_date(message: types.Message, state: FSMContext):
     try:
         dt = datetime.strptime(message.text, "%d.%m.%Y")
-        # Локализуем дату в нужный таймзону
         dt = tz.localize(dt.replace(hour=12, minute=0, second=0))
+        await state.clear()
         await show_schedule_view(message, message.from_user.id, "day", dt.strftime("%Y-%m-%d"), 0)
     except ValueError:
-        await message.answer("❌ Неверный формат даты. Пример: `15.04.2026`")
+        await message.answer("❌ Неверный формат. Пример: `15.04.2026`")
 
+@dp.message(ScheduleFSM.waiting_custom_date)
+async def invalid_custom_date(message: types.Message, state: FSMContext):
+    await message.answer("❌ Неверный формат. Введите дату как `15.04.2026` или нажмите /skip для отмены")
+
+# ✅ Исправлено: добавлен StateFilter для корректной работы с состоянием
+@dp.callback_query(F.data == "schedule", StateFilter(ScheduleFSM.waiting_custom_date))
+@dp.message(F.text.lower() == "/skip", StateFilter(ScheduleFSM.waiting_custom_date))
+async def cancel_custom_date(message_or_cb: types.Message | types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    response = message_or_cb.message if hasattr(message_or_cb, 'message') else message_or_cb
+    await response.answer("❌ Ввод даты отменён. Выберите период:")
+    if hasattr(message_or_cb, 'answer'): await message_or_cb.answer()
+
+# ================= WEBHOOK & STARTUP =================
 async def gcal_callback(request):
     code = request.query.get("code")
     state = request.query.get("state")

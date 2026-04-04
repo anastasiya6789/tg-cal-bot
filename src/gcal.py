@@ -13,6 +13,36 @@ def to_iso(dt: datetime) -> str:
         dt = tz.localize(dt)
     return dt.isoformat()
 
+def format_date_range(period: str, start: datetime, end: datetime) -> str:
+    """Форматирует диапазон дат для заголовка"""
+    s = start.strftime("%d.%m.%Y")
+    e = end.strftime("%d.%m.%Y")
+    if period == "day":
+        return s
+    return f"{s}–{e}"
+
+def group_events_by_day(events: list) -> dict:
+    """Группирует события по датам для красивого вывода"""
+    grouped = {}
+    for e in events:
+        start_dt = e['start'].get('dateTime', e['start'].get('date'))
+        # Извлекаем дату (первые 10 символов: YYYY-MM-DD)
+        date_key = start_dt[:10]
+        if date_key not in grouped:
+            grouped[date_key] = []
+        grouped[date_key].append(e)
+    return grouped
+
+def format_event(e: dict) -> str:
+    """Форматирует одно событие в строку"""
+    start_dt = e['start'].get('dateTime', e['start'].get('date'))
+    s_time = start_dt[11:16] if len(start_dt) > 16 else "весь день"
+    title = e.get('summary', 'Без названия')
+    loc = f" 📍{e.get('location', '')}" if e.get('location') else ""
+    desc = e.get('description', '')
+    desc_short = f" 💬 {desc[:30]}..." if len(desc) > 30 else f" 💬 {desc}" if desc else ""
+    return f"⏰ {s_time} — {title}{loc}{desc_short}"
+
 async def create_event(user_id, event_data):
     creds = await get_credentials(user_id)
     if not creds:
@@ -20,7 +50,6 @@ async def create_event(user_id, event_data):
 
     service = build('calendar', 'v3', credentials=creds)
 
-    # Парсим start/end из строк в datetime с таймзоной
     start_dt = datetime.fromisoformat(event_data['start'])
     end_dt = datetime.fromisoformat(event_data['end'])
     if start_dt.tzinfo is None:
@@ -57,12 +86,11 @@ async def create_event(user_id, event_data):
 async def get_schedule(user_id, period="day", target_date=None, offset=0, limit=8):
     creds = await get_credentials(user_id)
     if not creds:
-        return False, "❌ Сначала подключи Google", False
+        return False, "❌ Сначала подключи Google", False, None
 
-    # Базовая дата с таймзоной
     if target_date:
         base_dt = datetime.strptime(target_date, "%Y-%m-%d")
-        base_dt = tz.localize(base_dt.replace(hour=12, minute=0, second=0))  # середина дня
+        base_dt = tz.localize(base_dt.replace(hour=12, minute=0, second=0))
     else:
         base_dt = datetime.now(tz)
 
@@ -81,7 +109,7 @@ async def get_schedule(user_id, period="day", target_date=None, offset=0, limit=
         else:
             end = start.replace(month=base_dt.month+1, day=1, microsecond=0) - timedelta(seconds=1)
     else:
-        return False, "❌ Неизвестный период", False
+        return False, "❌ Неизвестный период", False, None
 
     service = build('calendar', 'v3', credentials=creds)
     
@@ -94,25 +122,29 @@ async def get_schedule(user_id, period="day", target_date=None, offset=0, limit=
             orderBy='startTime'
         ).execute()
     except Exception as e:
-        return False, f"❌ Ошибка API: {str(e)}", False
+        return False, f"❌ Ошибка API: {str(e)}", False, None
 
     all_events = events_result.get('items', [])
     paginated = all_events[offset:offset+limit]
     has_more = len(all_events) > offset + limit
 
+    # Формируем красивый вывод
     if not paginated:
         text = "📭 Нет событий на этот период."
     else:
         period_label = {"day": "день", "week": "неделю", "month": "месяц"}[period]
-        date_str = base_dt.strftime("%d.%m.%Y")
-        text = f"📋 Расписание на {period_label} ({date_str}):\n\n"
-        for e in paginated:
-            start_dt = e['start'].get('dateTime', e['start'].get('date'))
-            s_time = start_dt[11:16] if len(start_dt) > 16 else "весь день"
-            title = e.get('summary', 'Без названия')
-            loc = f" 📍{e.get('location', '')}" if e.get('location') else ""
-            desc = e.get('description', '')
-            desc_short = f" 💬 {desc[:35]}..." if len(desc) > 35 else f" 💬 {desc}" if desc else ""
-            text += f"⏰ {s_time} — {title}{loc}{desc_short}\n"
+        date_range = format_date_range(period, start, end)
+        text = f"📋 Расписание на {period_label} ({date_range}):\n\n"
+        
+        # Группируем по дням
+        grouped = group_events_by_day(paginated)
+        for date_key in sorted(grouped.keys()):
+            # Форматируем заголовок дня: 13.04.2026
+            day_dt = datetime.strptime(date_key, "%Y-%m-%d")
+            day_header = day_dt.strftime("🗓 %d.%m.%Y")
+            text += f"{day_header}\n"
+            for e in grouped[date_key]:
+                text += format_event(e) + "\n"
+            text += "\n"  # пустая строка между днями
 
-    return True, text, has_more
+    return True, text, has_more, {"start": start, "end": end}

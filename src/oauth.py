@@ -8,7 +8,7 @@ from db import get_token, save_token
 # ✅ ДОБАВЛЯЕМ SCOPE ДЛЯ ЗАДАЧ
 SCOPES = [
     'https://www.googleapis.com/auth/calendar',
-    'https://www.googleapis.com/auth/tasks' 
+    'https://www.googleapis.com/auth/tasks'  # ← важно для чтения задач
 ]
 REDIRECT_URI = os.getenv('REDIRECT_URI')
 CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')

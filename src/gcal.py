@@ -55,31 +55,41 @@ def detect_type(e):
 def clean_description(desc):
     if not desc: return ''
     desc = TYPE_TAG_RE.sub('', desc).strip()
+    desc_lower = desc.lower().strip()
+    
+    # ✅ Жёсткая фильтрация авто-текстов Google (учитываем "...", регистр и пробелы)
     for ad in AUTO_DESC:
-        if desc.lower().strip() == ad.lower(): return ''
+        ad_clean = ad.lower().strip()
+        if desc_lower == ad_clean or desc_lower.startswith(ad_clean):
+            return ''
     return desc
 
 def fmt_evt(e):
     start_data = e.get('start', {})
     end_data = e.get('end', {})
-    dt_str = start_data.get('dateTime') or start_data.get('date')
     
-    # Проверяем, весь ли день (есть поле date, нет dateTime)
+    # ✅ Надёжное определение全天ного события
     is_all_day = 'date' in start_data and 'dateTime' not in start_data
     
     if is_all_day:
         time_str = "весь день"
-    elif dt_str and 'T' in dt_str:
-        t_start = dt_str[11:16]
-        end_str = end_data.get('dateTime') or end_data.get('date')
-        if end_str and 'T' in end_str:
-            t_end = end_str[11:16]
-            time_str = t_start if t_start == t_end else f"{t_start}-{t_end}"
-        else:
-            time_str = t_start
     else:
-        time_str = "весь день"
-        
+        dt_str = start_data.get('dateTime')
+        if not dt_str:
+            time_str = "весь день"
+        else:
+            t_start = dt_str[11:16]
+            # Если Google отдал dateTime но время 00:00 → считаем全天ным
+            if t_start == "00:00":
+                time_str = "весь день"
+            else:
+                end_dt_str = end_data.get('dateTime')
+                if end_dt_str and 'T' in end_dt_str:
+                    t_end = end_dt_str[11:16]
+                    time_str = t_start if t_start == t_end else f"{t_start}-{t_end}"
+                else:
+                    time_str = t_start
+            
     title = e.get('summary', 'Без названия')
     loc = f" 📍{e.get('location')}" if e.get('location') else ""
     desc = clean_description(e.get('description', ''))
@@ -99,7 +109,6 @@ async def create_event(uid, data):
     if en.tzinfo is None: en = tz.localize(en)
     
     desc = (data.get('description') or '').strip()
-    # Добавляем скрытый тег, чтобы потом правильно определить тип
     tag = f"<!-- TG_TYPE:{data['type']} -->"
     desc = f"{desc}\n{tag}" if desc else tag
     
@@ -143,7 +152,13 @@ async def get_schedule(uid, period="day", target=None, off=0, lim=20):
     # 1. Calendar Events
     try:
         cal = build('calendar','v3',credentials=cr)
+        seen_ids = set()  # ✅ Защита от дублей из API
         for e in cal.events().list(calendarId='primary',timeMin=to_iso(st),timeMax=to_iso(en),singleEvents=True,orderBy='startTime').execute().get('items',[]):
+            eid = e.get('id')
+            if eid in seen_ids:
+                continue
+            seen_ids.add(eid)
+            
             sdt = parse_dt(e.get('start',{}).get('dateTime') or e.get('start',{}).get('date'))
             items.append({
                 'summary':e.get('summary',''),
@@ -160,7 +175,6 @@ async def get_schedule(uid, period="day", target=None, off=0, lim=20):
     # 2. Tasks API (старые задачи)
     try:
         ts = build('tasks','v1',credentials=cr)
-        # Расширяем диапазон на 1 день, чтобы точно захватить задачи на границах
         tmin = (st - timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
         tmax = (en + timedelta(days=1)).strftime("%Y-%m-%dT23:59:59Z")
         
@@ -176,7 +190,7 @@ async def get_schedule(uid, period="day", target=None, off=0, lim=20):
                 'location':'',
                 'start':{'dateTime':due},
                 'end':{'dateTime':due},
-                '_is_native_task':True,  # ← Метка для detect_type
+                '_is_native_task':True,
                 '_sort_dt':due_dt,
                 '_dk':due_dt.strftime("%Y-%m-%d")
             })

@@ -13,7 +13,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from db import init_db, save_event_id, delete_event_id
 from oauth import get_auth_url, handle_callback
-from gcal import create_event, get_schedule, update_event, delete_event, fmt_evt, detect_type
+from gcal import create_event, get_schedule, update_event, delete_event, fmt_evt, detect_type, to_iso
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -113,11 +113,9 @@ async def set_deadline(message: types.Message, state: FSMContext):
         dt = datetime.now(tz)
     else:
         try:
-            # ✅ Теперь требуем год: ДД.ММ.ГГГГ ЧЧ:ММ
             if '.' in message.text and len(message.text.split('.')[2].split()[0]) == 4:
                 dt = datetime.strptime(message.text, "%d.%m.%Y %H:%M")
             else:
-                # Фоллбэк: если года нет, берём текущий
                 dt = datetime.strptime(message.text, "%d.%m %H:%M")
                 dt = dt.replace(year=datetime.now(tz).year)
             dt = tz.localize(dt)
@@ -265,12 +263,14 @@ async def finalize_event(callback: types.CallbackQuery, state: FSMContext):
         "deadline": data.get('deadline')
     }
 
-    success, msg, event_id = await create_event(callback.from_user.id, event_data)
-    await callback.message.edit_text(msg)
-    
-    if success and event_id:
-        await save_event_id(callback.from_user.id, event_id)
-    
+    try:
+        success, msg, event_id = await create_event(callback.from_user.id, event_data)
+        await callback.message.edit_text(msg)
+        if success and event_id:
+            await save_event_id(callback.from_user.id, event_id)
+    except Exception as e:
+        logger.error(f"Create error: {e}")
+        await callback.message.edit_text(f"❌ Ошибка: {e}")
     await state.clear()
     await callback.answer()
 
@@ -297,12 +297,6 @@ async def show_schedule_view(message_or_cb, user_id, period, date_str, offset=0)
                 await message_or_cb.message.edit_text(text)
                 await message_or_cb.answer()
             return
-
-        # ✅ Сохраняем текущую дату в state для управления
-        if isinstance(message_or_cb, types.CallbackQuery):
-            from aiogram.fsm.context import FSMContext
-            # Небольшой хак: передаём дату через callback_data в кнопки управления
-            pass
 
         nav_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"sched|{period}|{date_str}|{offset}|prev"),
@@ -352,7 +346,7 @@ async def cmd_schedule(message_or_cb: types.Message | types.CallbackQuery):
 @dp.callback_query(F.data.startswith("sched_init|"))
 async def init_schedule(callback: types.CallbackQuery):
     period = callback.data.split("|")[1]
-    today = datetime.now(tz).strftime("%Y-%m-%d")  # ✅ Используем tz-aware datetime
+    today = datetime.now(tz).strftime("%Y-%m-%d")
     await show_schedule_view(callback, callback.from_user.id, period, today, 0)
     await callback.answer()
 
@@ -362,7 +356,6 @@ async def navigate_schedule(callback: types.CallbackQuery):
         _, period, date_str, offset_str, action = callback.data.split("|")
         offset = int(offset_str)
         base_dt = datetime.strptime(date_str, "%Y-%m-%d")
-        # ✅ Локализуем дату правильно
         base_dt = tz.localize(base_dt.replace(hour=12, minute=0, second=0))
         
         if action in ("next", "prev"):
@@ -422,89 +415,119 @@ async def cancel_custom_date(message_or_cb: types.Message | types.CallbackQuery,
     await response.answer("❌ Отменено. Выберите период:")
     if hasattr(message_or_cb, 'answer'): await message_or_cb.answer()
 
+# ================= УПРАВЛЕНИЕ: ПОЛУЧЕНИЕ СПИСКА СОБЫТИЙ ИЗ GOOGLE =================
+async def _fetch_manageable_events(user_id, date_str):
+    """Получаем события из Google Calendar API для управления (все, не только из нашей БД)"""
+    from oauth import get_credentials
+    from googleapiclient.discovery import build
+    
+    cr = await get_credentials(user_id)
+    if not cr:
+        return []
+    
+    try:
+        svc = build('calendar','v3',credentials=cr)
+        target_dt = datetime.strptime(date_str, "%Y-%m-%d")
+        target_dt = tz.localize(target_dt.replace(hour=0, minute=0, second=0))
+        time_min = to_iso(target_dt)
+        time_max = to_iso(target_dt.replace(hour=23, minute=59, second=59))
+        
+        events = []
+        for e in svc.events().list(calendarId='primary', timeMin=time_min, timeMax=time_max, singleEvents=True, orderBy='startTime').execute().get('items', []):
+            events.append({
+                'id': e.get('id'),
+                'summary': e.get('summary', 'Без названия'),
+                'start': e.get('start', {}),
+                'end': e.get('end', {}),
+                'description': e.get('description', ''),
+                'location': e.get('location', ''),
+                '_raw': e
+            })
+        return events
+    except Exception as ex:
+        logger.error(f"Fetch events error: {ex}")
+        return []
+
 # ================= УПРАВЛЕНИЕ: ВЫБОР СОБЫТИЯ =================
 @dp.callback_query(F.data.startswith("sched_edit|"))
 @dp.callback_query(F.data.startswith("sched_delete|"))
 async def start_manage(callback: types.CallbackQuery, state: FSMContext):
     try:
         action = "edit" if "sched_edit" in callback.data else "delete"
-        # ✅ Получаем дату, для которой открыто расписание
         date_str = callback.data.split("|")[1]
         await state.update_data(manage_action=action, manage_date=date_str)
         
-        # Получаем события именно для этой даты
-        result = await get_schedule(callback.from_user.id, "day", date_str, 0)
-        if len(result) == 5:
-            success, _, _, _, pag_items = result
-        else:
-            success, _, _, _ = result
-            pag_items = []
+        events = await _fetch_manageable_events(callback.from_user.id, date_str)
         
-        if not success or not pag_items:
+        if not events:
             await callback.answer("📭 Нет событий для управления на эту дату", show_alert=True)
             return
         
-        # Формируем список кнопок (макс 10)
-        buttons = []
-        for i, item in enumerate(pag_items[:10]):
-            time_str = fmt_evt(item).split(" — ")[0].replace("⏰ ", "")
-            title = item.get('summary', 'Без названия')[:30]
-            event_id = item.get('_eid')
-            if not event_id: 
-                continue  # Пропускаем события без ID (старые, созданные не через бота)
-            
-            cb_data = f"select_{action}|{item['_typ']}|{event_id}|{i}"
-            buttons.append([InlineKeyboardButton(text=f"{i+1}. {time_str} — {title}", callback_data=cb_data)])
+        event_map = {str(i): ev for i, ev in enumerate(events[:10])}
+        await state.update_data(event_map=event_map)
         
-        if not buttons:
-            await callback.answer("ℹ️ Нет событий, созданных через бота. Управление доступно только для них.", show_alert=True)
-            return
+        buttons = []
+        for idx, ev in event_map.items():
+            start_data = ev['start']
+            dt_str = start_data.get('dateTime') or start_data.get('date')
+            if dt_str and 'T' in dt_str:
+                time_str = dt_str[11:16]
+            else:
+                time_str = "весь день"
+            
+            title = ev['summary'][:30]
+            cb_data = f"select_{action}|{idx}"
+            buttons.append([InlineKeyboardButton(text=f"{idx+1}. {time_str} — {title}", callback_data=cb_data)])
         
         buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="back_to_schedule")])
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
         
         action_text = "✏️ Выберите событие для редактирования:" if action == "edit" else "🗑 Выберите событие для удаления:"
-        await callback.message.edit_text(f"{action_text}\n\n(Показаны только события, созданные через бота)", reply_markup=kb)
+        await callback.message.edit_text(f"{action_text}\n\n(Показаны события на {date_str})", reply_markup=kb)
         await callback.answer()
     except Exception as e:
         logger.error(f"Manage start error: {e}\n{traceback.format_exc()}")
         await callback.answer("❌ Ошибка", show_alert=True)
 
-# ================= ВЫБОР СОБЫТИЯ =================
+# ================= ВЫБОР СОБЫТИЯ ПО ИНДЕКСУ =================
 @dp.callback_query(F.data.startswith("select_edit|"))
 @dp.callback_query(F.data.startswith("select_delete|"))
 async def handle_select(callback: types.CallbackQuery, state: FSMContext):
     try:
         parts = callback.data.split("|")
         action = parts[0].split("_")[1]
-        event_type = parts[1]
-        event_id = parts[2]
+        idx = parts[1]
         
-        await state.update_data(selected_event_id=event_id, selected_event_type=event_type)
+        data = await state.get_data()
+        event_map = data.get('event_map', {})
+        
+        if idx not in event_map:
+            await callback.answer("❌ Событие не найдено", show_alert=True)
+            return
+        
+        event = event_map[idx]
+        event_id = event['id']
+        
+        await state.update_data(selected_event_id=event_id, selected_event_raw=event['_raw'])
         
         if action == "delete":
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"confirm_delete|{event_id}")],
+                [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"confirm_delete|{idx}")],
                 [InlineKeyboardButton(text="❌ Отмена", callback_data="back_to_schedule")]
             ])
-            await callback.message.edit_text("⚠️ Вы точно хотите удалить это событие?\nЭто действие нельзя отменить.", reply_markup=kb)
+            await callback.message.edit_text(f"⚠️ Удалить событие?\n📌 {event['summary']}\nЭто действие нельзя отменить.", reply_markup=kb)
         else:
-            # ✅ Выбор поля для редактирования
+            from gcal import detect_type
+            event_type = detect_type(event['_raw'])
+            await state.update_data(selected_event_type=event_type)
+            
             if event_type == "task":
-                fields = [
-                    ("🔖 Название", "title"),
-                    ("📅 Дата", "date"),
-                    ("⏰ Время", "time")
-                ]
+                fields = [("🔖 Название", "title"), ("📅 Дата", "date"), ("⏰ Время", "time")]
             else:
                 fields = [
-                    ("🔖 Название", "title"),
-                    ("📍 Локация", "location"),
-                    ("📝 Описание", "description"),
-                    ("📅 Дата начала", "start_date"),
-                    ("⏰ Время начала", "start_time"),
-                    ("📅 Дата окончания", "end_date"),
-                    ("⏰ Время окончания", "end_time")
+                    ("🔖 Название", "title"), ("📍 Локация", "location"), ("📝 Описание", "description"),
+                    ("📅 Дата начала", "start_date"), ("⏰ Время начала", "start_time"),
+                    ("📅 Дата окончания", "end_date"), ("⏰ Время окончания", "end_time")
                 ]
             
             buttons = [[InlineKeyboardButton(text=name, callback_data=f"edit_field|{field}")] for name, field in fields]
@@ -519,32 +542,28 @@ async def handle_select(callback: types.CallbackQuery, state: FSMContext):
 
 # ================= ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ =================
 @dp.callback_query(F.data.startswith("confirm_delete|"))
-async def confirm_delete(callback: types.CallbackQuery):
+async def confirm_delete(callback: types.CallbackQuery, state: FSMContext):
     try:
-        event_id = callback.data.split("|")[1]
+        idx = callback.data.split("|")[1]
+        data = await state.get_data()
+        event_map = data.get('event_map', {})
         
-        # ✅ Проверяем, существует ли событие, перед удалением
-        from oauth import get_credentials
-        from googleapiclient.discovery import build
-        cr = await get_credentials(callback.from_user.id)
-        if cr:
-            try:
-                svc = build('calendar','v3',credentials=cr)
-                svc.events().get(calendarId='primary', eventId=event_id).execute()
-            except Exception as fetch_err:
-                if "404" in str(fetch_err) or "notFound" in str(fetch_err):
-                    await callback.message.edit_text("❌ Событие не найдено в календаре. Возможно, оно уже удалено.")
-                    await delete_event_id(callback.from_user.id, event_id)  # Чистим БД
-                    await callback.answer()
-                    return
+        if idx not in event_map:
+            await callback.message.edit_text("❌ Событие не найдено")
+            await callback.answer()
+            return
+        
+        event = event_map[idx]
+        event_id = event['id']
         
         success, msg = await delete_event(callback.from_user.id, event_id)
         
-        if success:
+        if success or "404" in msg or "notFound" in msg:
             await delete_event_id(callback.from_user.id, event_id)
-            await callback.message.edit_text(f"{msg}\n\nНажмите /schedule, чтобы увидеть обновлённое расписание")
+            await callback.message.edit_text(f"✅ Удалено!\n\nНажмите /schedule, чтобы увидеть обновлённое расписание")
         else:
             await callback.message.edit_text(msg)
+        
         await callback.answer()
     except Exception as e:
         logger.error(f"Delete confirm error: {e}")
@@ -578,10 +597,11 @@ async def save_new_value(message: types.Message, state: FSMContext):
     try:
         data = await state.get_data()
         event_id = data.get('selected_event_id')
+        event_raw = data.get('selected_event_raw')
         field = data.get('edit_field')
         event_type = data.get('selected_event_type')
         
-        if not event_id or not field:
+        if not event_id or not field or not event_raw:
             await message.answer("❌ Ошибка: данные не найдены")
             await state.clear()
             return
@@ -593,62 +613,60 @@ async def save_new_value(message: types.Message, state: FSMContext):
         elif field == "location":
             update_data['location'] = message.text
         elif field == "description":
-            update_data['description'] = message.text
+            from gcal import TYPE_TAG_RE
+            old_desc = event_raw.get('description', '')
+            tag_match = TYPE_TAG_RE.search(old_desc)
+            tag = tag_match.group(0) if tag_match else ''
+            new_desc = message.text.strip()
+            update_data['description'] = f"{new_desc}\n{tag}" if new_desc else tag
         elif field in ["date", "start_date", "end_date"]:
             try:
-                # ✅ Явно парсим с годом
                 if '.' in message.text and len(message.text.split('.')[2]) == 4:
                     new_date = datetime.strptime(message.text, "%d.%m.%Y")
                 else:
                     new_date = datetime.strptime(message.text, "%d.%m")
-                    new_date = new_date.replace(year=datetime.now(tz).year)  # ✅ Фикс года 1900
+                    new_date = new_date.replace(year=datetime.now(tz).year)
                 
-                from oauth import get_credentials
-                from googleapiclient.discovery import build
-                cr = await get_credentials(message.from_user.id)
-                if cr:
-                    svc = build('calendar','v3',credentials=cr)
-                    ev = svc.events().get(calendarId='primary', eventId=event_id).execute()
-                    old_start = ev['start'].get('dateTime') or ev['start'].get('date')
-                    old_end = ev['end'].get('dateTime') or ev['end'].get('date')
+                old_start = event_raw['start'].get('dateTime') or event_raw['start'].get('date')
+                old_end = event_raw['end'].get('dateTime') or event_raw['end'].get('date')
+                
+                if field in ["date", "start_date"] and old_start and 'T' in old_start:
+                    old_time = old_start[11:16]
+                    new_dt = datetime.strptime(f"{new_date.strftime('%Y-%m-%d')} {old_time}", "%Y-%m-%d %H:%M")
+                    update_data['start'] = tz.localize(new_dt).isoformat()
+                
+                if field in ["date", "end_date"] and old_end and 'T' in old_end:
+                    old_time = old_end[11:16]
+                    new_dt = datetime.strptime(f"{new_date.strftime('%Y-%m-%d')} {old_time}", "%Y-%m-%d %H:%M")
+                    update_data['end'] = tz.localize(new_dt).isoformat()
                     
-                    if old_start and 'T' in old_start:
-                        old_start_time = old_start[11:16]
-                        new_start = datetime.strptime(f"{new_date.strftime('%Y-%m-%d')} {old_start_time}", "%Y-%m-%d %H:%M")
-                        update_data['start'] = tz.localize(new_start).isoformat()
+                if 'date' in event_raw['start'] and 'dateTime' not in event_raw['start']:
+                    update_data['start'] = {'date': new_date.strftime('%Y-%m-%d')}
+                    update_data['end'] = {'date': new_date.strftime('%Y-%m-%d')}
                     
-                    if old_end and 'T' in old_end:
-                        old_end_time = old_end[11:16]
-                        new_end = datetime.strptime(f"{new_date.strftime('%Y-%m-%d')} {old_end_time}", "%Y-%m-%d %H:%M")
-                        update_data['end'] = tz.localize(new_end).isoformat()
             except ValueError:
                 await message.answer("❌ Неверный формат даты. Пример: `10.04.2026`")
                 return
         elif field in ["time", "start_time", "end_time"]:
             try:
                 new_time = datetime.strptime(message.text, "%H:%M")
-                from oauth import get_credentials
-                from googleapiclient.discovery import build
-                cr = await get_credentials(message.from_user.id)
-                if cr:
-                    svc = build('calendar','v3',credentials=cr)
-                    ev = svc.events().get(calendarId='primary', eventId=event_id).execute()
-                    old_start = ev['start'].get('dateTime') or ev['start'].get('date')
-                    old_end = ev['end'].get('dateTime') or ev['end'].get('date')
-                    
-                    if field in ["time", "start_time"] and old_start and 'T' in old_start:
-                        old_date = old_start[:10]
-                        new_dt = datetime.strptime(f"{old_date} {message.text}", "%Y-%m-%d %H:%M")
-                        update_data['start'] = tz.localize(new_dt).isoformat()
-                    
-                    if field in ["time", "end_time"] and old_end and 'T' in old_end:
-                        old_date = old_end[:10]
-                        new_dt = datetime.strptime(f"{old_date} {message.text}", "%Y-%m-%d %H:%M")
-                        update_data['end'] = tz.localize(new_dt).isoformat()
+                old_start = event_raw['start'].get('dateTime') or event_raw['start'].get('date')
+                old_end = event_raw['end'].get('dateTime') or event_raw['end'].get('date')
+                
+                if field in ["time", "start_time"] and old_start and 'T' in old_start:
+                    old_date = old_start[:10]
+                    new_dt = datetime.strptime(f"{old_date} {message.text}", "%Y-%m-%d %H:%M")
+                    update_data['start'] = tz.localize(new_dt).isoformat()
+                
+                if field in ["time", "end_time"] and old_end and 'T' in old_end:
+                    old_date = old_end[:10]
+                    new_dt = datetime.strptime(f"{old_date} {message.text}", "%Y-%m-%d %H:%M")
+                    update_data['end'] = tz.localize(new_dt).isoformat()
             except ValueError:
                 await message.answer("❌ Неверный формат времени. Пример: `14:30`")
                 return
         
+        # ✅ ИСПРАВЛЕНО: было "if update_" → стало "if update_data:"
         if update_data:
             success, msg = await update_event(message.from_user.id, event_id, update_data)
             await message.answer(f"{msg}\n\nНажмите /schedule, чтобы увидеть обновлённое расписание")

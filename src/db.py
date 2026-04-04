@@ -23,7 +23,6 @@ async def get_token(user_id):
             row = await cur.fetchone()
             if not row: return None
             acc, ref, exp = row
-            # Если токен просрочен > 5 мин, считаем невалидным (форсируем refresh)
             if datetime.now(timezone.utc).timestamp() > exp - 300:
                 return None
             return acc, ref

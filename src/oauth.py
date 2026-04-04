@@ -13,21 +13,18 @@ TOKEN_URI = 'https://oauth2.googleapis.com/token'
 AUTH_URI = 'https://accounts.google.com/o/oauth2/auth'
 
 def get_auth_url(state):
-    """Генерируем ссылку для авторизации"""
     params = {
         'client_id': CLIENT_ID,
         'redirect_uri': REDIRECT_URI,
         'response_type': 'code',
         'scope': ' '.join(SCOPES),
         'state': state,
-        'access_type': 'offline',  # чтобы получить refresh_token
-        'prompt': 'consent',       # чтобы гарантированно получить refresh_token
+        'access_type': 'offline',
+        'prompt': 'consent',
     }
     return f"{AUTH_URI}?{urllib.parse.urlencode(params)}"
 
 async def handle_callback(code, state, user_id):
-    """Обрабатываем callback от Google и получаем токены"""
-    # Ручной обмен code на токены (без Flow, без PKCE)
     data = {
         'code': code,
         'client_id': CLIENT_ID,
@@ -38,16 +35,15 @@ async def handle_callback(code, state, user_id):
     response = requests.post(TOKEN_URI, data=data)
     response.raise_for_status()
     result = response.json()
-    
+
     access_token = result.get('access_token')
-    refresh_token = result.get('refresh_token')  # придёт только при первом подключении!
+    refresh_token = result.get('refresh_token')
     expires_in = result.get('expires_in', 3600)
-    
+
     if not access_token:
         raise ValueError("No access token in response")
-    
+
     await save_token(user_id, access_token, refresh_token, expires_in)
-    
     return Credentials(
         token=access_token,
         refresh_token=refresh_token,
@@ -58,11 +54,9 @@ async def handle_callback(code, state, user_id):
     )
 
 async def get_credentials(user_id):
-    """Получаем валидные креды из БД, делаем рефреш если нужно"""
     token_data = await get_token(user_id)
     if not token_data:
         return None
-    
     acc, ref = token_data
     creds = Credentials(
         token=acc,
@@ -72,11 +66,9 @@ async def get_credentials(user_id):
         client_secret=CLIENT_SECRET,
         scopes=SCOPES,
     )
-    
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
         from datetime import datetime, timezone
         expires_in = max(0, int((creds.expiry - datetime.now(timezone.utc)).total_seconds()))
         await save_token(user_id, creds.token, creds.refresh_token, expires_in)
-    
     return creds

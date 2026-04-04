@@ -15,7 +15,6 @@ from db import init_db
 from oauth import get_auth_url, handle_callback
 from gcal import create_event, get_schedule
 
-# Включаем подробные логи для отладки
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
@@ -27,14 +26,12 @@ tz = pytz.timezone(TZ_NAME)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ================= ERROR HANDLER (показывает реальные ошибки) =================
 @dp.errors()
 async def errors_handler(update: types.Update, exception: Exception):
     logger.error(f"❌ Ошибка в обновлении {update.update_id}: {exception}")
     logger.error(traceback.format_exc())
-    return True  # не падать, а продолжать работу
+    return True
 
-# ================= FSM STATES =================
 class ScheduleFSM(StatesGroup):
     waiting_custom_date = State()
 
@@ -49,7 +46,6 @@ class EventCreation(StatesGroup):
     setting_deadline = State()
     confirming = State()
 
-# ================= MAIN MENU =================
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -59,7 +55,6 @@ async def cmd_start(message: types.Message):
     ])
     await message.answer("👋 Привет! Я твой помощник по расписанию.\n\n🔧 Команды:\n/start — Меню\n/create — Создать\n/schedule — Расписание", reply_markup=kb)
 
-# ✅ Хендлер для кнопки "🏠 Меню" (раньше его не было!)
 @dp.callback_query(F.data == "start")
 async def back_to_menu(callback: types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -70,7 +65,6 @@ async def back_to_menu(callback: types.CallbackQuery):
     await callback.message.edit_text("👋 Главное меню:", reply_markup=kb)
     await callback.answer()
 
-# ================= CONNECT GOOGLE =================
 @dp.message(Command("connect"))
 @dp.callback_query(F.data == "connect")
 async def cmd_connect(message_or_cb: types.Message | types.CallbackQuery):
@@ -82,7 +76,6 @@ async def cmd_connect(message_or_cb: types.Message | types.CallbackQuery):
     await response.answer("🔐 Нажми кнопку, чтобы разрешить доступ к календарю:", reply_markup=kb)
     if hasattr(message_or_cb, 'answer'): await message_or_cb.answer()
 
-# ================= CREATE EVENT FSM =================
 @dp.message(Command("create"))
 @dp.callback_query(F.data == "create")
 async def start_creation(message_or_cb: types.Message | types.CallbackQuery, state: FSMContext):
@@ -254,15 +247,18 @@ async def cancel_creation(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text("❌ Создание отменено. Введите `/create` чтобы начать заново.")
     await callback.answer()
 
-# ================= SCHEDULE VIEW =================
+# ================= SCHEDULE VIEW (ИСПРАВЛЕНО) =================
 async def show_schedule_view(message_or_cb, user_id, period, date_str, offset=0):
     try:
         success, text, has_more, _ = await get_schedule(user_id, period, date_str, offset)
         if not success:
-            await (message_or_cb.message.edit_text(text) if hasattr(message_or_cb, 'message') else message_or_cb.answer(text))
+            if isinstance(message_or_cb, types.Message):
+                await message_or_cb.answer(text)
+            else:
+                await message_or_cb.message.edit_text(text)
+                await message_or_cb.answer()
             return
 
-        # ✅ Используем "|" как разделитель вместо "_" чтобы даты не ломались
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"sched|{period}|{date_str}|{offset}|prev"),
              InlineKeyboardButton(text="➡️ Вперёд", callback_data=f"sched|{period}|{date_str}|{offset}|next")],
@@ -272,13 +268,21 @@ async def show_schedule_view(message_or_cb, user_id, period, date_str, offset=0)
         ])
         if has_more:
             kb.inline_keyboard.append([InlineKeyboardButton(text="📄 Ещё события", callback_data=f"sched|{period}|{date_str}|{offset+8}|more")])
-        
-        response = message_or_cb.message if hasattr(message_or_cb, 'message') else message_or_cb
-        await response.edit_text(text, reply_markup=kb)
-        if hasattr(message_or_cb, 'answer'): await message_or_cb.answer()
+
+        # ✅ ГЛАВНЫЙ ФИКС: выбираем метод отправки в зависимости от типа объекта
+        if isinstance(message_or_cb, types.Message):
+            await message_or_cb.answer(text, reply_markup=kb)
+        else:
+            await message_or_cb.message.edit_text(text, reply_markup=kb)
+            await message_or_cb.answer()
     except Exception as e:
         logger.error(f"Ошибка в show_schedule_view: {e}\n{traceback.format_exc()}")
-        await (message_or_cb.message.edit_text("❌ Ошибка загрузки расписания") if hasattr(message_or_cb, 'message') else message_or_cb.answer("❌ Ошибка"))
+        err_text = "❌ Ошибка загрузки расписания"
+        if isinstance(message_or_cb, types.Message):
+            await message_or_cb.answer(err_text)
+        else:
+            await message_or_cb.message.edit_text(err_text)
+            await message_or_cb.answer()
 
 @dp.message(Command("schedule"))
 @dp.callback_query(F.data == "schedule")
@@ -302,7 +306,6 @@ async def init_schedule(callback: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("sched|"))
 async def navigate_schedule(callback: types.CallbackQuery):
     try:
-        # ✅ Парсим через "|" — надёжно даже с датами
         _, period, date_str, offset_str, action = callback.data.split("|")
         offset = int(offset_str)
         
@@ -316,7 +319,7 @@ async def navigate_schedule(callback: types.CallbackQuery):
                     y = base_dt.year
                     if m > 12: m, y = 1, y + 1
                     base_dt = base_dt.replace(year=y, month=m, day=1)
-            else:  # prev
+            else:
                 if period == "day": base_dt -= timedelta(days=1)
                 elif period == "week": base_dt -= timedelta(days=7)
                 elif period == "month":
@@ -324,13 +327,10 @@ async def navigate_schedule(callback: types.CallbackQuery):
                     y = base_dt.year
                     if m < 1: m, y = 12, y - 1
                     base_dt = base_dt.replace(year=y, month=m, day=1)
-            # При смене периода сбрасываем пагинацию
             await show_schedule_view(callback, callback.from_user.id, period, base_dt.strftime("%Y-%m-%d"), 0)
         elif action == "more":
-            # Показываем следующую порцию событий
             await show_schedule_view(callback, callback.from_user.id, period, date_str, offset)
         elif action == "refresh":
-            # Просто обновляем
             await show_schedule_view(callback, callback.from_user.id, period, date_str, 0)
         
         await callback.answer()
@@ -338,7 +338,6 @@ async def navigate_schedule(callback: types.CallbackQuery):
         logger.error(f"Ошибка в navigate_schedule: {e}\n{traceback.format_exc()}")
         await callback.answer("❌ Ошибка навигации", show_alert=True)
 
-# ================= CUSTOM DATE FSM =================
 @dp.callback_query(F.data == "sched_custom")
 async def ask_custom_date(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(ScheduleFSM.waiting_custom_date)
@@ -369,7 +368,6 @@ async def cancel_custom_date(message_or_cb: types.Message | types.CallbackQuery,
     await response.answer("❌ Отменено. Выберите период:")
     if hasattr(message_or_cb, 'answer'): await message_or_cb.answer()
 
-# ================= WEBHOOK & STARTUP =================
 async def gcal_callback(request):
     code = request.query.get("code")
     state = request.query.get("state")

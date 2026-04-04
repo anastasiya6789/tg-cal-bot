@@ -417,7 +417,6 @@ async def cancel_custom_date(message_or_cb: types.Message | types.CallbackQuery,
 
 # ================= УПРАВЛЕНИЕ: ПОЛУЧЕНИЕ СПИСКА СОБЫТИЙ ИЗ GOOGLE =================
 async def _fetch_manageable_events(user_id, date_str):
-    """Получаем события из Google Calendar API для управления (все, не только из нашей БД)"""
     from oauth import get_credentials
     from googleapiclient.discovery import build
     
@@ -463,6 +462,7 @@ async def start_manage(callback: types.CallbackQuery, state: FSMContext):
             await callback.answer("📭 Нет событий для управления на эту дату", show_alert=True)
             return
         
+        # ✅ event_map: ключи — строки ("0", "1"...), значения — события
         event_map = {str(i): ev for i, ev in enumerate(events[:10])}
         await state.update_data(event_map=event_map)
         
@@ -476,8 +476,10 @@ async def start_manage(callback: types.CallbackQuery, state: FSMContext):
                 time_str = "весь день"
             
             title = ev['summary'][:30]
+            # ✅ callback_data: строка + строка = ок
             cb_data = f"select_{action}|{idx}"
-            buttons.append([InlineKeyboardButton(text=f"{idx+1}. {time_str} — {title}", callback_data=cb_data)])
+            # ✅ ИСПРАВЛЕНО: int(idx) + 1, а не idx + 1
+            buttons.append([InlineKeyboardButton(text=f"{int(idx)+1}. {time_str} — {title}", callback_data=cb_data)])
         
         buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="back_to_schedule")])
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -666,7 +668,6 @@ async def save_new_value(message: types.Message, state: FSMContext):
                 await message.answer("❌ Неверный формат времени. Пример: `14:30`")
                 return
         
-        # ✅ ИСПРАВЛЕНО: было "if update_" → стало "if update_data:"
         if update_data:
             success, msg = await update_event(message.from_user.id, event_id, update_data)
             await message.answer(f"{msg}\n\nНажмите /schedule, чтобы увидеть обновлённое расписание")

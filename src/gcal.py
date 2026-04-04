@@ -24,6 +24,7 @@ def parse_dt(d):
     try:
         if 'T' in s:
             if s.endswith('Z'):
+                # UTC → локальное время
                 dt = datetime.fromisoformat(s.replace('Z','+00:00')).astimezone(tz)
             else:
                 dt = datetime.fromisoformat(s)
@@ -71,13 +72,14 @@ async def create_event(uid, data):
     
     if data.get('type')=='task':
         ts = build('tasks','v1',credentials=cr)
-        due = datetime.fromisoformat(data['start'])
-        if due.tzinfo is None: due = tz.localize(due)
-        # Отправляем в API время с явным часовым поясом: 2026-04-06T16:05:00+03:00
-        due_str = due.strftime("%Y-%m-%dT%H:%M:%S%z")
-        # Форматируем таймзону как +03:00 вместо +0300
-        if len(due_str)==25 and due_str[-5] in '+-':
-            due_str = due_str[:-2]+':'+due_str[-2:]
+        # Парсим локальное время из input
+        due_local = datetime.fromisoformat(data['start'])
+        if due_local.tzinfo is None: due_local = tz.localize(due_local)
+        
+        # ✅ Конвертируем локальное время → UTC для отправки в API
+        due_utc = due_local.astimezone(pytz.UTC)
+        due_str = due_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        
         try:
             ts.tasks().insert(tasklist='@default',body={
                 'title':data['title'],
@@ -90,6 +92,7 @@ async def create_event(uid, data):
             logger.error(f"Tasks err: {ex}")
             return False,f"❌ Ошибка: {ex}"
     
+    # Встречи/мероприятия -> Calendar API
     svc = build('calendar','v3',credentials=cr)
     st = datetime.fromisoformat(data['start'])
     en = datetime.fromisoformat(data['end'])
@@ -156,30 +159,25 @@ async def get_schedule(uid, period="day", target=None, off=0, lim=20):
     # Tasks API
     try:
         ts = build('tasks','v1',credentials=cr)
-        tmin = st.strftime("%Y-%m-%dT00:00:00%z").replace('+0000','+00:00')
-        tmax = en.strftime("%Y-%m-%dT23:59:59%z").replace('+0000','+00:00')
-        for t in ts.tasks().list(tasklist='@default',dueMin=tmin,dueMax=tmax,showCompleted=False,showHidden=False).execute().get('items',[]):
+        # Запрашиваем задачи в том же диапазоне (в формате, который понимает API)
+        tmin = st.astimezone(pytz.UTC).strftime("%Y-%m-%dT00:00:00.000Z")
+        tmax = en.astimezone(pytz.UTC).strftime("%Y-%m-%dT23:59:59.000Z")
+        
+        tasks_list = ts.tasks().list(tasklist='@default',dueMin=tmin,dueMax=tmax,showCompleted=False,showHidden=False).execute()
+        for t in tasks_list.get('items',[]):
             due = t.get('due')
             if not due: continue
             
-            # ✅ Парсим время дедлайна корректно
+            # ✅ Конвертируем из UTC в локальное время для отображения
             if due.endswith('Z'):
-                # UTC → локальное время
-                dt_utc = datetime.fromisoformat(due.replace('Z','+00:00'))
+                dt_utc = datetime.fromisoformat(due)
                 dt_local = dt_utc.astimezone(tz)
                 disp = dt_local.strftime("%H:%M")
                 sdt = dt_local
-            elif '+' in due or (due.count('-') > 2):
-                # Уже с часовым поясом: 2026-04-06T16:05:00+03:00
-                # Извлекаем время напрямую
-                time_part = due.split('T')[1][:5] if 'T' in due else "00:00"
-                date_part = due.split('T')[0] if 'T' in due else due[:10]
-                disp = time_part
-                sdt = tz.localize(datetime.strptime(f"{date_part} {time_part}","%Y-%m-%d %H:%M"))
             else:
-                # Только дата
+                # fallback: парсим как есть
                 disp = "до конца дня"
-                sdt = tz.localize(datetime.strptime(due,"%Y-%m-%d").replace(hour=23,minute=59))
+                sdt = tz.localize(datetime.strptime(due[:10],"%Y-%m-%d").replace(hour=23,minute=59))
             
             if sdt < st or sdt > en: continue
             items.append({
@@ -189,7 +187,7 @@ async def get_schedule(uid, period="day", target=None, off=0, lim=20):
                 'start':{'dateTime':due},
                 'end':{'dateTime':due},
                 '_task':True,
-                '_disp':disp,  # ✅ Преформатированное время для отображения
+                '_disp':disp,
                 '_sdt':sdt,
                 '_dk':sdt.strftime("%Y-%m-%d")
             })

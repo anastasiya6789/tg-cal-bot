@@ -8,7 +8,8 @@ import re
 TZ_NAME = os.getenv("TIMEZONE", "Europe/Moscow")
 tz = pytz.timezone(TZ_NAME)
 
-TYPE_TAG_RE = re.compile(r'<!--\s*TG_TYPE:\s*(meeting|task|event)\s*-->')
+# Скрытый тег для событий календаря, чтобы отличать их при чтении
+TYPE_TAG_RE = re.compile(r'<!--\s*TG_TYPE:\s*(meeting|event)\s*-->')
 TASK_KEYWORDS = ['дедлайн', 'deadline', 'задача', 'task', 'сделать', 'подготовить']
 
 TYPE_EMOJI = {
@@ -19,24 +20,39 @@ TYPE_EMOJI = {
 TYPE_ORDER = ['meeting', 'task', 'event']
 
 def to_iso(dt: datetime) -> str:
+    """Конвертирует datetime в ISO 8601 с timezone"""
     if dt.tzinfo is None:
         dt = tz.localize(dt)
     return dt.isoformat()
+
+def parse_datetime(dt_str: str) -> datetime:
+    """Парсит строку даты/времени из Google API в datetime с таймзоной"""
+    if not dt_str:
+        return None
+    # Google отдаёт либо "2026-04-15T14:00:00+03:00", либо "2026-04-15" (весь день)
+    if 'T' in dt_str:
+        dt = datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
+    else:
+        dt = datetime.strptime(dt_str, "%Y-%m-%d")
+        dt = tz.localize(dt.replace(hour=12, minute=0))  # середина дня для whole-day
+    if dt.tzinfo is None:
+        dt = tz.localize(dt)
+    return dt
 
 def format_date_range(period, start, end):
     s, e = start.strftime("%d.%m.%Y"), end.strftime("%d.%m.%Y")
     return s if period == "day" else f"{s}–{e}"
 
 def detect_type(e):
+    """Определяет тип: задачи из Tasks API помечены флагом, события — по тегу/эвристике"""
+    if e.get('_is_native_task'):
+        return 'task'
+    
     desc = e.get('description', '')
     m = TYPE_TAG_RE.search(desc)
     if m:
         return m.group(1)
     
-    # Если это принудительно помеченная задача из API
-    if e.get('_is_native_task'):
-        return 'task'
-
     if e.get('attendees'):
         return 'meeting'
     if any(kw in desc.lower() for kw in TASK_KEYWORDS):
@@ -46,16 +62,29 @@ def detect_type(e):
 def clean_description(desc):
     return TYPE_TAG_RE.sub('', desc).strip()
 
+def format_time(dt_str: str) -> str:
+    """Форматирует время для отображения: 14:00 или 'весь день'"""
+    if not dt_str:
+        return "весь день"
+    if 'T' in dt_str:
+        return dt_str[11:16]  # HH:MM
+    return "весь день"
+
 def format_event(e):
+    """Форматирует событие/задачу в строку для Telegram"""
     start_dt = e['start'].get('dateTime', e['start'].get('date'))
-    s_time = start_dt[11:16] if len(start_dt) > 16 else "весь день"
+    s_time = format_time(start_dt)
     title = e.get('summary', 'Без названия')
     loc = f" 📍{e['location']}" if e.get('location') else ""
     desc = clean_description(e.get('description', ''))
     desc_short = f" 💬 {desc[:30]}..." if len(desc) > 30 else (f" 💬 {desc}" if desc else "")
-    return f"⏰ {s_time} — {title}{loc}{desc_short}"
+    
+    # Для задач добавляем статус выполнения
+    status = "✅ " if e.get('_is_native_task') and e.get('status') == 'completed' else ""
+    return f"⏰ {s_time} — {status}{title}{loc}{desc_short}"
 
-async def create_event(user_id, event_data):
+async def create_calendar_event(user_id, event_data):
+    """Создаёт событие в Google Calendar (для встреч/мероприятий)"""
     creds = await get_credentials(user_id)
     if not creds:
         return False, "❌ Сначала подключи Google командой /connect"
@@ -66,6 +95,7 @@ async def create_event(user_id, event_data):
     if start_dt.tzinfo is None: start_dt = tz.localize(start_dt)
     if end_dt.tzinfo is None: end_dt = tz.localize(end_dt)
 
+    # Добавляем скрытый тег типа в описание
     base_desc = event_data.get('description', '')
     type_tag = f"<!-- TG_TYPE:{event_data['type']} -->"
     full_desc = f"{base_desc}\n{type_tag}" if base_desc else type_tag
@@ -84,11 +114,50 @@ async def create_event(user_id, event_data):
 
     try:
         event = service.events().insert(calendarId='primary', body=body).execute()
-        return True, f"✅ Создано!\n{event.get('htmlLink', 'Событие создано')}"
+        return True, f"✅ Создано в календаре!\n{event.get('htmlLink', '')}"
     except Exception as e:
-        return False, f"❌ Ошибка Google Calendar: {str(e)}"
+        return False, f"❌ Ошибка Calendar API: {str(e)}"
+
+async def create_task(user_id, event_data):
+    """Создаёт задачу в Google Tasks (с дедлайном и галочкой)"""
+    creds = await get_credentials(user_id)
+    if not creds:
+        return False, "❌ Сначала подключи Google командой /connect"
+
+    tasks_service = build('tasks', 'v1', credentials=creds)
+    
+    # Парсим дедлайн
+    due_dt = datetime.fromisoformat(event_data['start'])  # для задач start = deadline
+    if due_dt.tzinfo is None:
+        due_dt = tz.localize(due_dt)
+    
+    # Формируем описание с дедлайном и типом
+    notes = event_data.get('description', '')
+    if event_data.get('deadline'):
+        notes += f"\n⏰ Дедлайн: {event_data['deadline']}"
+    
+    task_body = {
+        'title': event_data['title'],
+        'notes': notes,
+        'due': to_iso(due_dt),
+        'status': 'needsAction'
+    }
+    
+    try:
+        task = tasks_service.tasks().insert(tasklist='@default', body=task_body).execute()
+        return True, f"✅ Задача создана!"
+    except Exception as e:
+        return False, f"❌ Ошибка Tasks API: {str(e)}"
+
+async def create_event(user_id, event_data):
+    """Универсальный метод: выбирает API по типу события"""
+    if event_data.get('type') == 'task':
+        return await create_task(user_id, event_data)
+    else:
+        return await create_calendar_event(user_id, event_data)
 
 async def get_schedule(user_id, period="day", target_date=None, offset=0, limit=20):
+    """Получает события из Calendar + задачи из Tasks, объединяет и форматирует"""
     creds = await get_credentials(user_id)
     if not creds:
         return False, "❌ Сначала подключи Google", False, None
@@ -110,60 +179,77 @@ async def get_schedule(user_id, period="day", target_date=None, offset=0, limit=
     else:
         return False, "❌ Неизвестный период", False, None
 
-    service = build('calendar', 'v3', credentials=creds)
+    all_items = []
+
+    # 1. Получаем события из Calendar API
     try:
-        # 1. Получаем обычные события
-        res = service.events().list(
+        cal_service = build('calendar', 'v3', credentials=creds)
+        res = cal_service.events().list(
             calendarId='primary', timeMin=to_iso(start), timeMax=to_iso(end),
             singleEvents=True, orderBy='startTime'
         ).execute()
         events = res.get('items', [])
         
-        # 2. Получаем ЗАДАЧИ (Tasks API)
+        for e in events:
+            # Нормализуем формат для единого отображения
+            all_items.append({
+                'summary': e.get('summary', 'Без названия'),
+                'description': e.get('description', ''),
+                'location': e.get('location', ''),
+                'start': e.get('start', {}),
+                '_is_native_task': False,
+                'status': None
+            })
+    except Exception as e:
+        logger.error(f"Calendar API error: {e}")
+
+    # 2. Получаем задачи из Tasks API
+    try:
         tasks_service = build('tasks', 'v1', credentials=creds)
         tasks_res = tasks_service.tasks().list(
             tasklist='@default', 
             dueMin=to_iso(start), 
             dueMax=to_iso(end),
-            showCompleted=False, # Скрываем выполненные задачи
+            showCompleted=False,
             showHidden=False
         ).execute()
         tasks = tasks_res.get('items', [])
-    except Exception as e:
-        return False, f"❌ Ошибка API: {str(e)}", False, None
-
-    # 3. Нормализуем задачи, чтобы они выглядели как события
-    normalized_tasks = []
-    for t in tasks:
-        due = t.get('due') # Формат ISO 8601
-        if not due: continue
         
-        # Приводим задачу к формату события
-        normalized_tasks.append({
-            'summary': t['title'],
-            'description': t.get('notes', ''),
-            'location': '',
-            'start': {'dateTime': due},
-            '_is_native_task': True # Метка для детектора типа
-        })
+        for t in tasks:
+            due = t.get('due')
+            if not due:
+                continue
+            # Приводим задачу к формату события
+            all_items.append({
+                'summary': t['title'],
+                'description': t.get('notes', ''),
+                'location': '',
+                'start': {'dateTime': due},
+                '_is_native_task': True,
+                'status': t.get('status')
+            })
+    except Exception as e:
+        logger.error(f"Tasks API error: {e}")
 
-    # 4. Объединяем списки
-    all_items = events + normalized_tasks
-    
-    # Сортируем всё по времени
-    all_items.sort(key=lambda x: x['start'].get('dateTime', x['start'].get('date')))
+    # 3. Сортируем всё по времени
+    def get_sort_key(item):
+        dt_str = item['start'].get('dateTime', item['start'].get('date', '9999'))
+        return dt_str
+    all_items.sort(key=get_sort_key)
 
-    # 5. Определяем типы
+    # 4. Определяем типы
     for e in all_items:
         e['_type'] = detect_type(e)
 
-    # 6. Группируем: Тип -> Дата -> Список
+    # 5. Группируем: Тип -> Дата -> Список
     grouped = {}
     for e in all_items:
-        date_key = e['start'].get('dateTime', e['start'].get('date'))[:10]
+        date_key = e['start'].get('dateTime', e['start'].get('date', ''))[:10]
+        if not date_key or len(date_key) < 10:
+            continue
         grouped.setdefault(e['_type'], {}).setdefault(date_key, []).append(e)
 
-    # 7. Плоский список для пагинации
+    # 6. Плоский список для пагинации (строго по порядку типов)
     flat_ordered = []
     for t in TYPE_ORDER:
         if t in grouped:
@@ -173,7 +259,7 @@ async def get_schedule(user_id, period="day", target_date=None, offset=0, limit=
     paginated = flat_ordered[offset:offset+limit]
     has_more = len(flat_ordered) > offset + limit
 
-    # 8. Формируем текст
+    # 7. Формируем текст
     if not paginated:
         text = "📭 Нет событий и задач на этот период."
     else:
@@ -182,7 +268,9 @@ async def get_schedule(user_id, period="day", target_date=None, offset=0, limit=
         
         display_grouped = {}
         for e in paginated:
-            date_key = e['start'].get('dateTime', e['start'].get('date'))[:10]
+            date_key = e['start'].get('dateTime', e['start'].get('date', ''))[:10]
+            if not date_key or len(date_key) < 10:
+                continue
             display_grouped.setdefault(e['_type'], {}).setdefault(date_key, []).append(e)
 
         for t in TYPE_ORDER:

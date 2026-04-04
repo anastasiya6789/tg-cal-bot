@@ -15,7 +15,7 @@ from db import init_db
 from oauth import get_auth_url, handle_callback
 from gcal import create_event, get_schedule
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -28,8 +28,7 @@ dp = Dispatcher()
 
 @dp.errors()
 async def errors_handler(update: types.Update, exception: Exception):
-    logger.error(f"❌ Ошибка в обновлении {update.update_id}: {exception}")
-    logger.error(traceback.format_exc())
+    logger.error(f"❌ Ошибка: {exception}\n{traceback.format_exc()}")
     return True
 
 class ScheduleFSM(StatesGroup):
@@ -73,7 +72,7 @@ async def cmd_connect(message_or_cb: types.Message | types.CallbackQuery):
     url = get_auth_url(state)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔐 Авторизовать Google", url=url)]])
     response = message_or_cb.message if hasattr(message_or_cb, 'message') else message_or_cb
-    await response.answer("🔐 Нажми кнопку, чтобы разрешить доступ к календарю:", reply_markup=kb)
+    await response.answer("🔐 Нажми кнопку, чтобы разрешить доступ к календарю и задачам:", reply_markup=kb)
     if hasattr(message_or_cb, 'answer'): await message_or_cb.answer()
 
 @dp.message(Command("create"))
@@ -92,10 +91,30 @@ async def start_creation(message_or_cb: types.Message | types.CallbackQuery, sta
 
 @dp.callback_query(F.data.startswith("type_"))
 async def choose_type(callback: types.CallbackQuery, state: FSMContext):
-    await state.update_data(type=callback.data.split("_")[1])
-    await callback.message.edit_text("📅 Введите дату и время НАЧАЛА: `ДД.ММ ЧЧ:ММ`\n(или `/now` для сейчас)")
-    await state.set_state(EventCreation.setting_start)
+    event_type = callback.data.split("_")[1]
+    await state.update_data(type=event_type)
+    
+    if event_type == "task":
+        await callback.message.edit_text("✅ Введите название задачи:")
+    else:
+        await callback.message.edit_text("📅 Введите дату и время НАЧАЛА: `ДД.ММ ЧЧ:ММ`\n(или `/now` для сейчас)")
+    
+    await state.set_state(EventCreation.setting_start if event_type != "task" else EventCreation.setting_title)
     await callback.answer()
+
+@dp.message(EventCreation.setting_title)
+async def set_title(message: types.Message, state: FSMContext):
+    await state.update_data(title=message.text)
+    data = await state.get_data()
+    
+    if data.get("type") == "task":
+        # Для задач: сразу спрашиваем дедлайн
+        await message.answer("⏰ Введите ДЕДЛАЙН: `ДД.ММ ЧЧ:ММ` (или `/skip`):")
+        await state.set_state(EventCreation.setting_deadline)
+    else:
+        # Для встреч/мероприятий: спрашиваем время окончания
+        await message.answer("📅 Введите дату и время ОКОНЧАНИЯ: `ДД.ММ ЧЧ:ММ`")
+        await state.set_state(EventCreation.setting_end)
 
 @dp.message(EventCreation.setting_start)
 async def set_start(message: types.Message, state: FSMContext):
@@ -122,44 +141,56 @@ async def set_end(message: types.Message, state: FSMContext):
     await message.answer("📝 Введите название события:")
     await state.set_state(EventCreation.setting_title)
 
-@dp.message(EventCreation.setting_title)
-async def set_title(message: types.Message, state: FSMContext):
-    await state.update_data(title=message.text)
-    await message.answer("📍 Введите локацию (или `/skip`):")
-    await state.set_state(EventCreation.setting_location)
+@dp.message(EventCreation.setting_deadline)
+async def set_deadline(message: types.Message, state: FSMContext):
+    if message.text.lower() == "/skip":
+        await state.update_data(deadline=None)
+        await state.update_data(start=datetime.now().isoformat())  # fallback
+    else:
+        try:
+            dt = datetime.strptime(message.text, "%d.%m %H:%M").replace(year=datetime.now().year)
+            await state.update_data(deadline=dt.strftime("%d.%m %H:%M"))
+            await state.update_data(start=dt.isoformat())  # для задач start = deadline
+        except ValueError:
+            await message.answer("❌ Неверный формат. Пример: `15.04 18:30`")
+            return
+    await show_location_prompt(message, state)
+
+async def show_location_prompt(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    if data.get("type") == "task":
+        # Задачи не имеют локации, сразу переходим к описанию
+        await show_description_prompt(message, state)
+    else:
+        await message.answer("📍 Введите локацию (или `/skip`):")
+        await state.set_state(EventCreation.setting_location)
 
 @dp.message(F.text.lower() == "/skip")
 async def skip_field(message: types.Message, state: FSMContext):
     current = await state.get_state()
     if current == EventCreation.setting_location:
         await state.update_data(location=None)
-        await message.answer("📄 Введите описание (или `/skip`):")
-        await state.set_state(EventCreation.setting_description)
+        await show_description_prompt(message, state)
     elif current == EventCreation.setting_description:
         await state.update_data(description=None)
         await show_color_selection(message, state)
-    elif current == EventCreation.setting_deadline:
-        await state.update_data(deadline=None)
-        await confirm_event(message, state)
     else:
-        await message.answer("❌ Пропуск доступен только для локации, описания или дедлайна")
+        await message.answer("❌ Пропуск доступен только для локации или описания")
     await message.delete()
 
 @dp.message(EventCreation.setting_location)
 async def set_location(message: types.Message, state: FSMContext):
     await state.update_data(location=message.text)
+    await show_description_prompt(message, state)
+
+async def show_description_prompt(message: types.Message, state: FSMContext):
     await message.answer("📄 Введите описание (или `/skip`):")
     await state.set_state(EventCreation.setting_description)
 
 @dp.message(EventCreation.setting_description)
 async def set_description(message: types.Message, state: FSMContext):
     await state.update_data(description=message.text)
-    data = await state.get_data()
-    if data.get("type") == "task":
-        await message.answer("⏰ Введите ДЕДЛАЙН: `ДД.ММ ЧЧ:ММ` (или `/skip`):")
-        await state.set_state(EventCreation.setting_deadline)
-    else:
-        await show_color_selection(message, state)
+    await show_color_selection(message, state)
 
 async def show_color_selection(message, state):
     data = await state.get_data()
@@ -182,39 +213,34 @@ async def choose_color(callback: types.CallbackQuery, state: FSMContext):
     await confirm_event(callback.message, state)
     await callback.answer()
 
-@dp.message(EventCreation.setting_deadline)
-async def set_deadline(message: types.Message, state: FSMContext):
-    if message.text.lower() == "/skip":
-        await state.update_data(deadline=None)
-    else:
-        try:
-            dt = datetime.strptime(message.text, "%d.%m %H:%M").replace(year=datetime.now().year)
-            await state.update_data(deadline=dt.strftime("%d.%m %H:%M"))
-        except ValueError:
-            await message.answer("❌ Неверный формат. Пример: `15.04 18:30`")
-            return
-    await confirm_event(message, state)
-
 async def confirm_event(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    start_str = data['start'][:16].replace('T', ' ')
-    end_str = data['end'][:16].replace('T', ' ')
-    preview = (
-        f"📋 <b>Предпросмотр</b>\n\n"
-        f"📌 Тип: {data.get('type')}\n"
-        f"🔖 Название: {data.get('title')}\n"
-        f"🕒 Начало: {start_str}\n"
-        f"🏁 Окончание: {end_str}\n"
-        f"📍 Локация: {data.get('location') or '—'}\n"
-        f"📝 Описание: {data.get('description') or '—'}\n"
-    )
-    if data.get("deadline"): preview += f"⏰ Дедлайн: {data['deadline']}\n"
-    preview += "\nОтправить в календарь?"
-
+    
+    if data.get("type") == "task":
+        # Для задач показываем упрощённый превью
+        preview = (
+            f"✅ <b>Предпросмотр задачи</b>\n\n"
+            f"🔖 Название: {data.get('title')}\n"
+            f"⏰ Дедлайн: {data.get('deadline') or data.get('start', '')[:16].replace('T', ' ')}\n"
+            f"📝 Описание: {data.get('description') or '—'}\n"
+        )
+    else:
+        start_str = data['start'][:16].replace('T', ' ')
+        end_str = data['end'][:16].replace('T', ' ')
+        preview = (
+            f"📋 <b>Предпросмотр</b>\n\n"
+            f"📌 Тип: {data.get('type')}\n"
+            f"🔖 Название: {data.get('title')}\n"
+            f"🕒 Начало: {start_str}\n"
+            f"🏁 Окончание: {end_str}\n"
+            f"📍 Локация: {data.get('location') or '—'}\n"
+            f"📝 Описание: {data.get('description') or '—'}\n"
+        )
+    
+    preview += "\nОтправить?"
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Да", callback_data="confirm_create"),
-         InlineKeyboardButton(text="✏️ Изменить", callback_data="cancel")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]
+         InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]
     ])
     await message.answer(preview, reply_markup=kb, parse_mode="HTML")
     await state.set_state(EventCreation.confirming)
@@ -241,13 +267,13 @@ async def finalize_event(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.answer()
 
-@dp.callback_query(F.data.in_({"edit_event", "cancel"}))
+@dp.callback_query(F.data == "cancel")
 async def cancel_creation(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.edit_text("❌ Создание отменено. Введите `/create` чтобы начать заново.")
     await callback.answer()
 
-# ================= SCHEDULE VIEW (ИСПРАВЛЕНО) =================
+# ================= SCHEDULE VIEW =================
 async def show_schedule_view(message_or_cb, user_id, period, date_str, offset=0):
     try:
         success, text, has_more, _ = await get_schedule(user_id, period, date_str, offset)
@@ -269,7 +295,6 @@ async def show_schedule_view(message_or_cb, user_id, period, date_str, offset=0)
         if has_more:
             kb.inline_keyboard.append([InlineKeyboardButton(text="📄 Ещё события", callback_data=f"sched|{period}|{date_str}|{offset+8}|more")])
 
-        # ✅ ГЛАВНЫЙ ФИКС: выбираем метод отправки в зависимости от типа объекта
         if isinstance(message_or_cb, types.Message):
             await message_or_cb.answer(text, reply_markup=kb)
         else:

@@ -56,6 +56,8 @@ def clean_description(desc):
 def fmt_evt(e):
     start_data = e.get('start', {})
     end_data = e.get('end', {})
+    
+    # Проверяем на all-day событие (есть поле 'date', нет 'dateTime')
     is_all_day = 'date' in start_data and 'dateTime' not in start_data
     
     if is_all_day:
@@ -63,18 +65,17 @@ def fmt_evt(e):
     else:
         dt_str = start_data.get('dateTime')
         if not dt_str:
+            # Фоллбэк: если нет dateTime, но есть date → всё день
             time_str = "весь день"
         else:
-            t_start = dt_str[11:16]
-            if t_start == "00:00":
-                time_str = "весь день"
+            t_start = dt_str[11:16]  # HH:MM
+            # ✅ УБРАЛИ проверку на 00:00 — показываем точное время даже для 0-минутных задач
+            end_dt_str = end_data.get('dateTime')
+            if end_dt_str and 'T' in end_dt_str:
+                t_end = end_dt_str[11:16]
+                time_str = t_start if t_start == t_end else f"{t_start}-{t_end}"
             else:
-                end_dt_str = end_data.get('dateTime')
-                if end_dt_str and 'T' in end_dt_str:
-                    t_end = end_dt_str[11:16]
-                    time_str = t_start if t_start == t_end else f"{t_start}-{t_end}"
-                else:
-                    time_str = t_start
+                time_str = t_start
             
     title = e.get('summary', 'Без названия')
     loc = f" 📍{e.get('location')}" if e.get('location') else ""

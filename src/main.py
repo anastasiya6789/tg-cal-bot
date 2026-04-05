@@ -505,12 +505,13 @@ async def start_manage(callback: types.CallbackQuery, state: FSMContext):
         
         buttons = []
         for idx, ev in event_map.items():
-            # ✅ Надёжное извлечение времени (работает даже для 0-минутных задач)
+            # ✅ Надёжное извлечение времени (работает для Tasks API и Calendar API)
             start = ev.get('start', {})
             end = ev.get('end', {})
             dt_str = start.get('dateTime') or start.get('date', '')
             
             if dt_str and 'T' in dt_str:
+                # Есть время в формате ISO: 2026-04-05T12:30:00Z
                 t_start = dt_str.split('T')[1][:5]  # HH:MM
                 end_dt_str = end.get('dateTime') or end.get('date', '')
                 if end_dt_str and 'T' in end_dt_str:
@@ -518,6 +519,15 @@ async def start_manage(callback: types.CallbackQuery, state: FSMContext):
                     time_str = t_start if t_start == t_end else f"{t_start}-{t_end}"
                 else:
                     time_str = t_start
+            elif dt_str and len(dt_str) == 10 and dt_str.count('-') == 2:
+                # Tasks API иногда отдаёт только дату: 2026-04-05
+                # Берём время из 'due' поля сырого объекта
+                raw = ev.get('_raw', {})
+                due = raw.get('due', '')
+                if due and 'T' in due:
+                    time_str = due.split('T')[1][:5]  # HH:MM из due
+                else:
+                    time_str = "00:00"  # Фоллбэк, если времени точно нет
             else:
                 time_str = "весь день"
             

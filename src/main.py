@@ -27,7 +27,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 @dp.errors()
-async def errors_handler(update: types.Update, exception: Exception):
+async def errors_handler(update: types.Update, exception: Exception):  # ✅ было без exception
     logger.error(f"❌ Ошибка: {exception}\n{traceback.format_exc()}")
     return True
 
@@ -341,7 +341,7 @@ async def cmd_schedule(message_or_cb: types.Message | types.CallbackQuery):
     ])
     response = message_or_cb.message if hasattr(message_or_cb, 'message') else message_or_cb
     await response.answer("Выберите период:", reply_markup=kb)
-    if hasattr(message_or_cb, 'answer'): await message_or_cb.answer()
+    #if hasattr(message_or_cb, 'answer'): await message_or_cb.answer()
 
 @dp.callback_query(F.data.startswith("sched_init|"))
 async def init_schedule(callback: types.CallbackQuery):

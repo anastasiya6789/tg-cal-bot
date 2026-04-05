@@ -58,45 +58,27 @@ def fmt_evt(e):
     end_data = e.get('end', {})
     is_tasks = e.get('_is_native_task', False)
     
-    # Для задач из Tasks API
     if is_tasks:
+        # ✅ Задачи из Tasks API: конвертируем UTC → локальный таймзон
         raw = e.get('_raw', {})
         due = raw.get('due', '')
         
-        # Логирование для отладки
-        logger.info(f"TASK DUE: {due}, raw={raw}")
-        
-        if due:
+        if due and 'T' in due:
             try:
-                if 'T' in due:
-                    # Формат: 2026-04-06T16:00:00.000Z
-                    time_part = due.split('T')[1][:5]  # HH:MM
-                    # Проверяем, не 00:00 ли это
-                    if time_part != "00:00":
-                        time_str = time_part
-                    else:
-                        # Если 00:00, пробуем распарсить и конвертировать из UTC
-                        due_dt = parse_dt(due)
-                        if due_dt:
-                            # Конвертируем в локальный часовой пояс
-                            due_local = due_dt.astimezone(tz)
-                            time_str = due_local.strftime("%H:%M")
-                        else:
-                            time_str = "весь день"
-                else:
-                    # Только дата без времени
-                    time_str = "весь день"
-            except Exception as ex:
-                logger.error(f"Error parsing task time: {ex}")
+                # Парсим UTC и конвертируем в локальный часовой пояс
+                due_dt = datetime.fromisoformat(due.replace('Z', '+00:00'))
+                due_local = due_dt.astimezone(tz)
+                time_str = due_local.strftime("%H:%M")
+            except:
                 time_str = "весь день"
         else:
             time_str = "весь день"
     else:
-        # Для событий Calendar API
+        # ✅ События из Calendar API
         start_dt_str = start_data.get('dateTime')
         end_dt_str = end_data.get('dateTime')
         
-        if not start_dt_str:
+        if not start_dt_str or 'T' not in start_dt_str:
             time_str = "весь день"
         else:
             try:

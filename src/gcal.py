@@ -62,33 +62,52 @@ def fmt_evt(e):
     if is_tasks:
         raw = e.get('_raw', {})
         due = raw.get('due', '')
-        if due and 'T' in due:
-            time_str = due.split('T')[1][:5]  # HH:MM
+        
+        # Логирование для отладки
+        logger.info(f"TASK DUE: {due}, raw={raw}")
+        
+        if due:
+            try:
+                if 'T' in due:
+                    # Формат: 2026-04-06T16:00:00.000Z
+                    time_part = due.split('T')[1][:5]  # HH:MM
+                    # Проверяем, не 00:00 ли это
+                    if time_part != "00:00":
+                        time_str = time_part
+                    else:
+                        # Если 00:00, пробуем распарсить и конвертировать из UTC
+                        due_dt = parse_dt(due)
+                        if due_dt:
+                            # Конвертируем в локальный часовой пояс
+                            due_local = due_dt.astimezone(tz)
+                            time_str = due_local.strftime("%H:%M")
+                        else:
+                            time_str = "весь день"
+                else:
+                    # Только дата без времени
+                    time_str = "весь день"
+            except Exception as ex:
+                logger.error(f"Error parsing task time: {ex}")
+                time_str = "весь день"
         else:
             time_str = "весь день"
     else:
         # Для событий Calendar API
-        # Извлекаем время начала — приоритет dateTime над date
-        start_dt = start_data.get('dateTime') or start_data.get('date')
+        start_dt_str = start_data.get('dateTime')
+        end_dt_str = end_data.get('dateTime')
         
-        if not start_dt:
-            time_str = "весь день"
-        elif 'T' not in start_dt:
-            # Только дата, без времени = действительно весь день
+        if not start_dt_str:
             time_str = "весь день"
         else:
-            # Есть время начала — извлекаем HH:MM
-            t_start = start_dt[11:16]
-            
-            # Проверяем время окончания для отображения диапазона
-            end_dt = end_data.get('dateTime') or end_data.get('date')
-            if end_dt and 'T' in end_dt:
-                t_end = end_dt[11:16]
-                # Если время начала и окончания совпадает (нулевая длительность) — показываем только время
-                time_str = t_start if t_start == t_end else f"{t_start}-{t_end}"
-            else:
-                # Если у окончания нет времени (например, нулевая длительность), показываем только время начала
-                time_str = t_start
+            try:
+                t_start = start_dt_str[11:16]
+                if end_dt_str and 'T' in end_dt_str:
+                    t_end = end_dt_str[11:16]
+                    time_str = t_start if t_start == t_end else f"{t_start}-{t_end}"
+                else:
+                    time_str = t_start
+            except (IndexError, TypeError):
+                time_str = "весь день"
     
     title = e.get('summary', 'Без названия')
     loc = f" 📍{e.get('location')}" if e.get('location') else ""

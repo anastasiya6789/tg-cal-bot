@@ -320,6 +320,7 @@ async def get_schedule(uid, period="day", target=None, off=0, lim=20):
                 'start':{'dateTime':due},
                 'end':{'dateTime':due},
                 '_is_native_task':True,
+                '_raw': t,  # ✅ ДОБАВИЛ: сохраняем сырые данные задачи
                 '_sort_dt':due_dt,
                 '_dk':due_dt.strftime("%Y-%m-%d") if due_dt else None,
                 '_eid':t['id']

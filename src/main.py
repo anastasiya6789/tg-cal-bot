@@ -466,15 +466,15 @@ async def _fetch_manageable_events(user_id, date_str, period="day"):
     except Exception as ex: 
         logger.error(f"Fetch tasks error: {ex}")
     
-    # ✅ ДЕДУПЛИКАЦИЯ: убираем дубли, оставшиеся от синхронизации Google
+    # ✅ Умная дедупликация: строго предпочитаем Tasks API, календарные дубли отбрасываем
     unique = {}
     for ev in events:
-        title = ev['summary'].strip().lower()
-        dt_str = ev['start'].get('dateTime') or ev['start'].get('date')
+        title_norm = ev['summary'].strip().lower()
+        dt_str = ev['start'].get('dateTime') or ev['start'].get('date', '')
         date_key = dt_str[:10] if dt_str else ''
-        key = (title, date_key)
+        key = (title_norm, date_key)
         
-        # ✅ Всегда оставляем версию из Tasks API (она точная), календарный дубль отбрасываем
+        # Если ключ уже есть, заменяем ТОЛЬКО если текущее событие из Tasks API
         if key not in unique or ev.get('_is_tasks_api'):
             unique[key] = ev
             
@@ -490,7 +490,6 @@ async def start_manage(callback: types.CallbackQuery, state: FSMContext):
         await state.update_data(manage_action=action, manage_date=date_str)
         
         events = await _fetch_manageable_events(callback.from_user.id, date_str, period="day")
-        
         if not events:
             await callback.answer("📭 Нет событий для управления на эту дату", show_alert=True)
             return
@@ -500,12 +499,25 @@ async def start_manage(callback: types.CallbackQuery, state: FSMContext):
         
         buttons = []
         for idx, ev in event_map.items():
-            start_data = ev['start']
-            dt_str = start_data.get('dateTime') or start_data.get('date')
-            if dt_str and 'T' in dt_str:
-                time_str = dt_str[11:16]
-            else:
+            # ✅ Надёжное извлечение времени (показывает точное время даже для 0-минутных задач)
+            start = ev.get('start', {})
+            end = ev.get('end', {})
+            is_all_day = 'date' in start and 'dateTime' not in start
+            
+            if is_all_day:
                 time_str = "весь день"
+            else:
+                dt_str = start.get('dateTime') or start.get('date', '')
+                if dt_str and 'T' in dt_str:
+                    t_start = dt_str.split('T')[1][:5]  # HH:MM
+                    end_dt_str = end.get('dateTime') or end.get('date', '')
+                    if end_dt_str and 'T' in end_dt_str:
+                        t_end = end_dt_str.split('T')[1][:5]
+                        time_str = t_start if t_start == t_end else f"{t_start}-{t_end}"
+                    else:
+                        time_str = t_start
+                else:
+                    time_str = "весь день"
             
             title = ev['summary'][:30]
             cb_data = f"select_{action}|{idx}"

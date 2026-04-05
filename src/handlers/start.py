@@ -1,9 +1,10 @@
 # handlers/start.py
 import secrets
-from aiogram import Router, types, F
+import logging
+from aiogram import Router, types, F, Bot
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from config import WEBHOOK_URL, BOT_USERNAME
+from config import WEBHOOK_URL, BOT_USERNAME, logger
 from oauth import get_auth_url
 from keyboards import main_menu_kb
 

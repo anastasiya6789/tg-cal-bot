@@ -3,6 +3,7 @@ import logging
 from datetime import datetime
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
+from aiogram.filters import Command, StateFilter  # ✅ ДОБАВИЛ
 from config import tz, logger
 from states import EventManage
 from keyboards import back_to_schedule_kb, delete_confirm_kb, edit_fields_kb

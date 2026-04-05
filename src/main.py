@@ -1,14 +1,15 @@
 # main.py
 import logging
+import os
 import traceback
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
-from config import BOT_TOKEN, WEBHOOK_URL, BOT_USERNAME, tz
+from config import BOT_TOKEN, WEBHOOK_URL, BOT_USERNAME, tz, logger
 from db import init_db
 from oauth import handle_callback
-from middlewares.errors import ErrorsMiddleware
 from handlers import start, create, schedule, manage
 
 logging.basicConfig(level=logging.INFO)

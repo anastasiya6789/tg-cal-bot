@@ -1,7 +1,9 @@
 # handlers/create.py
 import logging
-from aiogram import Router, types, F
+from datetime import datetime
+from aiogram import Router, types, F, Bot
 from aiogram.fsm.context import FSMContext
+from aiogram.filters import Command, StateFilter  # ✅ ДОБАВИЛ Command и StateFilter
 from config import tz, logger
 from states import EventCreation
 from keyboards import create_type_kb, color_selection_kb, confirm_kb, cancel_kb

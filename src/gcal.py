@@ -58,15 +58,15 @@ def fmt_evt(e):
     end_data = e.get('end', {})
     is_tasks = e.get('_is_native_task', False)
     
-    # ✅ Задачи из Tasks API — без времени, только название
+    # ✅ Задачи из Tasks API — без времени, со смайлом
     if is_tasks:
         title = e.get('summary', 'Без названия')
         loc = f" 📍{e.get('location')}" if e.get('location') else ""
         desc = clean_description(e.get('description', ''))
         desc_short = f" 💬 {desc[:30]}..." if len(desc) > 30 else (f" 💬 {desc}" if desc else "")
-        return f"{title}{loc}{desc_short}"
+        return f"📌 {title}{loc}{desc_short}"
     
-    # ✅ События из Calendar API — с временем (как было)
+    # ✅ События из Calendar API — с временем
     start_dt_str = start_data.get('dateTime')
     end_dt_str = end_data.get('dateTime')
     

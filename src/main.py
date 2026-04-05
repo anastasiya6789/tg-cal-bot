@@ -513,10 +513,10 @@ async def start_manage(callback: types.CallbackQuery, state: FSMContext):
             if is_tasks:
                 # ✅ Задачи из Tasks API — без времени
                 time_str = ""
+                prefix = "📌 "
             else:
                 # ✅ События из Calendar API — с временем
                 start_dt_str = start.get('dateTime') or start.get('date')
-                
                 if not start_dt_str or 'T' not in start_dt_str:
                     time_str = "весь день"
                 else:
@@ -528,16 +528,18 @@ async def start_manage(callback: types.CallbackQuery, state: FSMContext):
                             time_str = t_start if t_start == t_end else f"{t_start}-{t_end}"
                         else:
                             time_str = t_start
-                    except (IndexError, TypeError):
+                    except:
                         time_str = "весь день"
-            
-            # Формируем текст кнопки
+                prefix = ""
+
             title = ev['summary'][:30]
+            cb_data = f"select_{action}|{idx}"
+            
             if time_str:
                 btn_text = f"{int(idx)+1}. {time_str} — {title}"
             else:
-                btn_text = f"{int(idx)+1}. {title}"  # ✅ без времени для задач
-            cb_data = f"select_{action}|{idx}"
+                btn_text = f"{int(idx)+1}. {prefix}{title}"
+                
             buttons.append([InlineKeyboardButton(text=btn_text, callback_data=cb_data)])
         buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="back_to_schedule")])
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)

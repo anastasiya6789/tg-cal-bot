@@ -56,26 +56,34 @@ def clean_description(desc):
 def fmt_evt(e):
     start_data = e.get('start', {})
     end_data = e.get('end', {})
+    is_tasks = e.get('_is_native_task', False)
     
-    # Проверяем на all-day событие (есть поле 'date', нет 'dateTime')
-    is_all_day = 'date' in start_data and 'dateTime' not in start_data
-    
-    if is_all_day:
-        time_str = "весь день"
+    # Для задач из Tasks API
+    if is_tasks:
+        raw = e.get('_raw', {})
+        due = raw.get('due', '')
+        if due and 'T' in due:
+            time_str = due.split('T')[1][:5]  # HH:MM
+        else:
+            time_str = "весь день"
     else:
-        dt_str = start_data.get('dateTime')
-        if not dt_str:
-            # Фоллбэк: если нет dateTime, но есть date → всё день
+        # Для событий Calendar API
+        is_all_day = 'date' in start_data and 'dateTime' not in start_data
+        
+        if is_all_day:
             time_str = "весь день"
         else:
-            t_start = dt_str[11:16]  # HH:MM
-            # ✅ УБРАЛИ проверку на 00:00 — показываем точное время даже для 0-минутных задач
-            end_dt_str = end_data.get('dateTime')
-            if end_dt_str and 'T' in end_dt_str:
-                t_end = end_dt_str[11:16]
-                time_str = t_start if t_start == t_end else f"{t_start}-{t_end}"
+            dt_str = start_data.get('dateTime')
+            if not dt_str:
+                time_str = "весь день"
             else:
-                time_str = t_start
+                t_start = dt_str[11:16]
+                end_dt_str = end_data.get('dateTime')
+                if end_dt_str and 'T' in end_dt_str:
+                    t_end = end_dt_str[11:16]
+                    time_str = t_start if t_start == t_end else f"{t_start}-{t_end}"
+                else:
+                    time_str = t_start
             
     title = e.get('summary', 'Без названия')
     loc = f" 📍{e.get('location')}" if e.get('location') else ""

@@ -505,31 +505,37 @@ async def start_manage(callback: types.CallbackQuery, state: FSMContext):
         
         buttons = []
         for idx, ev in event_map.items():
-            # ✅ Надёжное извлечение времени (работает для Tasks API и Calendar API)
+            # ✅ Надёжное извлечение времени
             start = ev.get('start', {})
             end = ev.get('end', {})
-            dt_str = start.get('dateTime') or start.get('date', '')
+            is_tasks = ev.get('_is_tasks_api', False)
             
-            if dt_str and 'T' in dt_str:
-                # Есть время в формате ISO: 2026-04-05T12:30:00Z
-                t_start = dt_str.split('T')[1][:5]  # HH:MM
-                end_dt_str = end.get('dateTime') or end.get('date', '')
-                if end_dt_str and 'T' in end_dt_str:
-                    t_end = end_dt_str.split('T')[1][:5]
-                    time_str = t_start if t_start == t_end else f"{t_start}-{t_end}"
-                else:
-                    time_str = t_start
-            elif dt_str and len(dt_str) == 10 and dt_str.count('-') == 2:
-                # Tasks API иногда отдаёт только дату: 2026-04-05
-                # Берём время из 'due' поля сырого объекта
+            if is_tasks:
+                # Для Tasks API берём время напрямую из 'due' поля сырого объекта
                 raw = ev.get('_raw', {})
                 due = raw.get('due', '')
                 if due and 'T' in due:
-                    time_str = due.split('T')[1][:5]  # HH:MM из due
+                    # Формат: 2026-04-05T16:30:00.000Z
+                    time_part = due.split('T')[1][:5]  # HH:MM
+                    time_str = time_part
                 else:
-                    time_str = "00:00"  # Фоллбэк, если времени точно нет
+                    time_str = "весь день"
             else:
-                time_str = "весь день"
+                # Для Calendar API
+                dt_str = start.get('dateTime') or start.get('date', '')
+                if dt_str and 'T' in dt_str:
+                    t_start = dt_str.split('T')[1][:5]
+                    end_dt_str = end.get('dateTime') or end.get('date', '')
+                    if end_dt_str and 'T' in end_dt_str:
+                        t_end = end_dt_str.split('T')[1][:5]
+                        time_str = t_start if t_start == t_end else f"{t_start}-{t_end}"
+                    else:
+                        time_str = t_start
+                else:
+                    time_str = "весь день"
+            
+            # Логирование для отладки
+            logger.info(f"Event {idx}: title={ev['summary']}, is_tasks={is_tasks}, time_str={time_str}, start={start}")
             
             title = ev['summary'][:30]
             cb_data = f"select_{action}|{idx}"

@@ -68,23 +68,28 @@ def fmt_evt(e):
             time_str = "весь день"
     else:
         # Для событий Calendar API
-        is_all_day = 'date' in start_data and 'dateTime' not in start_data
+        # Извлекаем время начала — приоритет dateTime над date
+        start_dt = start_data.get('dateTime') or start_data.get('date')
         
-        if is_all_day:
+        if not start_dt:
+            time_str = "весь день"
+        elif 'T' not in start_dt:
+            # Только дата, без времени = действительно весь день
             time_str = "весь день"
         else:
-            dt_str = start_data.get('dateTime')
-            if not dt_str:
-                time_str = "весь день"
-            else:
-                t_start = dt_str[11:16]
-                end_dt_str = end_data.get('dateTime')
-                if end_dt_str and 'T' in end_dt_str:
-                    t_end = end_dt_str[11:16]
-                    time_str = t_start if t_start == t_end else f"{t_start}-{t_end}"
-                else:
-                    time_str = t_start
+            # Есть время начала — извлекаем HH:MM
+            t_start = start_dt[11:16]
             
+            # Проверяем время окончания для отображения диапазона
+            end_dt = end_data.get('dateTime') or end_data.get('date')
+            if end_dt and 'T' in end_dt:
+                t_end = end_dt[11:16]
+                # Если время начала и окончания совпадает (нулевая длительность) — показываем только время
+                time_str = t_start if t_start == t_end else f"{t_start}-{t_end}"
+            else:
+                # Если у окончания нет времени (например, нулевая длительность), показываем только время начала
+                time_str = t_start
+    
     title = e.get('summary', 'Без названия')
     loc = f" 📍{e.get('location')}" if e.get('location') else ""
     desc = clean_description(e.get('description', ''))

@@ -515,24 +515,28 @@ async def start_manage(callback: types.CallbackQuery, state: FSMContext):
                 raw = ev.get('_raw', {})
                 due = raw.get('due', '')
                 if due and 'T' in due:
-                    # Формат: 2026-04-05T16:30:00.000Z
                     time_part = due.split('T')[1][:5]  # HH:MM
                     time_str = time_part
                 else:
                     time_str = "весь день"
             else:
-                # Для Calendar API
-                dt_str = start.get('dateTime') or start.get('date', '')
-                if dt_str and 'T' in dt_str:
-                    t_start = dt_str.split('T')[1][:5]
-                    end_dt_str = end.get('dateTime') or end.get('date', '')
-                    if end_dt_str and 'T' in end_dt_str:
-                        t_end = end_dt_str.split('T')[1][:5]
+                # Для Calendar API — более надёжное извлечение времени
+                start = ev.get('start', {})
+                end = ev.get('end', {})
+                
+                start_dt = start.get('dateTime') or start.get('date')
+                if not start_dt or 'T' not in start_dt:
+                    time_str = "весь день"
+                else:
+                    t_start = start_dt.split('T')[1][:5]  # HH:MM
+                    
+                    end_dt = end.get('dateTime') or end.get('date')
+                    if end_dt and 'T' in end_dt:
+                        t_end = end_dt.split('T')[1][:5]
+                        # Нулевая длительность — показываем одно время
                         time_str = t_start if t_start == t_end else f"{t_start}-{t_end}"
                     else:
                         time_str = t_start
-                else:
-                    time_str = "весь день"
             
             # Логирование для отладки
             logger.info(f"Event {idx}: title={ev['summary']}, is_tasks={is_tasks}, time_str={time_str}, start={start}")

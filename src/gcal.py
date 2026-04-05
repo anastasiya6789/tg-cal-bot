@@ -1,11 +1,9 @@
+# gcal.py
 from googleapiclient.discovery import build
 from oauth import get_credentials
 from datetime import datetime, timedelta
 import pytz, os, re, logging
-
-logger = logging.getLogger(__name__)
-TZ_NAME = os.getenv("TIMEZONE", "Europe/Moscow")
-tz = pytz.timezone(TZ_NAME)
+from config import TZ_NAME, tz, logger
 
 TYPE_TAG_RE = re.compile(r'<!--\s*TG_TYPE:\s*(meeting|event|task)\s*-->', re.I)
 TASK_KEYWORDS = ['дедлайн', 'deadline', 'задача', 'task', 'сделать', 'подготовить', 'лаба', 'реферат', 'отчет', 'дз']
@@ -54,11 +52,12 @@ def clean_description(desc):
     return desc
 
 def fmt_evt(e):
+    """Форматирует событие для отображения в Телеграм"""
     start_data = e.get('start', {})
     end_data = e.get('end', {})
     is_tasks = e.get('_is_native_task', False)
     
-    # ✅ Задачи из Tasks API — без времени, со смайлом
+    # ✅ Задачи из Tasks API — БЕЗ времени, только 📌 + название
     if is_tasks:
         title = e.get('summary', 'Без названия')
         loc = f" 📍{e.get('location')}" if e.get('location') else ""
@@ -66,7 +65,7 @@ def fmt_evt(e):
         desc_short = f" 💬 {desc[:30]}..." if len(desc) > 30 else (f" 💬 {desc}" if desc else "")
         return f"📌 {title}{loc}{desc_short}"
     
-    # ✅ События из Calendar API — с временем
+    # ✅ События из Calendar API — с временем ⏰
     start_dt_str = start_data.get('dateTime')
     end_dt_str = end_data.get('dateTime')
     
@@ -120,7 +119,6 @@ async def create_event(uid, data):
         logger.error(f"Cal err: {ex}")
         return False, f"❌ Ошибка: {ex}", None
 
-# ✅ ФУНКЦИИ ДЛЯ TASKS API
 async def create_task(uid, data):
     cr = await get_credentials(uid)
     if not cr: return False, "❌ Сначала подключи Google", None
@@ -187,7 +185,6 @@ async def delete_task(uid, task_id):
         logger.error(f"Tasks delete err: {ex}")
         return False, f"❌ Ошибка: {ex}"
 
-# ✅ Обновлённый update_event для Calendar API
 async def update_event(uid, event_id, new_data):
     cr = await get_credentials(uid)
     if not cr: return False, "❌ Сначала подключи Google"
@@ -248,6 +245,71 @@ async def delete_event(uid, event_id):
             return True, "✅ Уже удалено"
         logger.error(f"Cal delete err: {ex}")
         return False, f"❌ Ошибка: {ex}"
+
+async def _fetch_manageable_events(user_id, date_str, period="day"):
+    """Получаем события для управления (редактирование/удаление)"""
+    from oauth import get_credentials
+    from googleapiclient.discovery import build
+    
+    cr = await get_credentials(user_id)
+    if not cr: return []
+    
+    tasks_map = {}
+    target_dt = datetime.strptime(date_str, "%Y-%m-%d")
+    target_dt = tz.localize(target_dt.replace(hour=0, minute=0, second=0))
+    
+    # 1. Tasks API
+    try:
+        svc_tasks = build('tasks','v1',credentials=cr)
+        tmin = (target_dt - timedelta(days=7)).strftime("%Y-%m-%dT00:00:00Z")
+        tmax = (target_dt + timedelta(days=7)).strftime("%Y-%m-%dT23:59:59Z")
+        
+        for t in svc_tasks.tasks().list(tasklist='@default', dueMin=tmin, dueMax=tmax, showCompleted=False, showHidden=False).execute().get('items', []):
+            due = t.get('due')
+            if not due: continue
+            due_dt = parse_dt(due)
+            if due_dt and period == "day" and due_dt.date() != target_dt.date(): 
+                continue
+            
+            title_norm = t.get('title', '').strip().lower()
+            date_key = due[:10] if due and len(due) >= 10 else (due_dt.strftime("%Y-%m-%d") if due_dt else date_str)
+            
+            tasks_map[(title_norm, date_key)] = {
+                'id': t.get('id'), 'summary': t.get('title', 'Без названия'),
+                'start': {'dateTime': due}, 'end': {'dateTime': due},
+                'description': t.get('notes', ''), 'location': '',
+                '_is_tasks_api': True, '_raw': t
+            }
+    except Exception as ex: 
+        logger.error(f"Fetch tasks error: {ex}")
+    
+    # 2. Calendar API
+    events = []
+    try:
+        svc_cal = build('calendar','v3',credentials=cr)
+        time_min = to_iso(target_dt)
+        time_max = to_iso(target_dt.replace(hour=23, minute=59, second=59))
+        
+        for e in svc_cal.events().list(calendarId='primary', timeMin=time_min, timeMax=time_max, singleEvents=True, orderBy='startTime').execute().get('items', []):
+            summary = e.get('summary', 'Без названия')
+            title_norm = summary.strip().lower()
+            start_data = e.get('start', {})
+            dt_str = start_data.get('dateTime') or start_data.get('date', '')
+            date_key = dt_str[:10] if dt_str else date_str
+            
+            if (title_norm, date_key) in tasks_map:
+                continue
+                
+            events.append({
+                'id': e.get('id'), 'summary': summary,
+                'start': start_data, 'end': e.get('end', {}),
+                'description': e.get('description', ''), 'location': e.get('location', ''),
+                '_is_tasks_api': False, '_raw': e
+            })
+    except Exception as ex: 
+        logger.error(f"Fetch calendar events error: {ex}")
+    
+    return list(tasks_map.values()) + events
 
 async def get_schedule(uid, period="day", target=None, off=0, lim=20):
     cr = await get_credentials(uid)
@@ -313,7 +375,7 @@ async def get_schedule(uid, period="day", target=None, off=0, lim=20):
                 'start':{'dateTime':due},
                 'end':{'dateTime':due},
                 '_is_native_task':True,
-                '_raw': t,  # ✅ ДОБАВИЛ: сохраняем сырые данные задачи
+                '_raw': t,
                 '_sort_dt':due_dt,
                 '_dk':due_dt.strftime("%Y-%m-%d") if due_dt else None,
                 '_eid':t['id']

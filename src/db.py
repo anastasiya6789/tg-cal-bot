@@ -1,14 +1,13 @@
+# db.py
 import aiosqlite
 from datetime import datetime, timezone
-
-DB_PATH = "./tokens.db"
+from config import DB_PATH
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute('''CREATE TABLE IF NOT EXISTS user_tokens (
             user_id INTEGER PRIMARY KEY,
             access_token TEXT, refresh_token TEXT, expires_at REAL)''')
-        # ✅ Новая таблица: связь пользователь <-> event_id из Google Calendar
         await db.execute('''CREATE TABLE IF NOT EXISTS user_events (
             user_id INTEGER,
             gcal_event_id TEXT,
@@ -33,7 +32,6 @@ async def get_token(user_id):
                 return None
             return acc, ref
 
-# ✅ Новые функции для работы с event_id
 async def save_event_id(user_id, gcal_event_id):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute('''INSERT OR REPLACE INTO user_events VALUES (?, ?, ?)''',
@@ -41,7 +39,6 @@ async def save_event_id(user_id, gcal_event_id):
         await db.commit()
 
 async def get_event_ids(user_id):
-    """Получаем все event_id пользователя"""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute('SELECT gcal_event_id FROM user_events WHERE user_id = ?', (user_id,)) as cur:
             return [row[0] for row in await cur.fetchall()]

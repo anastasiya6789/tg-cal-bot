@@ -1,30 +1,20 @@
+# oauth.py
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
-import os
 import urllib.parse
 import requests
+from config import SCOPES, REDIRECT_URI, CLIENT_ID, CLIENT_SECRET, TOKEN_URI, AUTH_URI
 from db import get_token, save_token
-
-# ✅ ДОБАВЛЯЕМ SCOPE ДЛЯ ЗАДАЧ
-SCOPES = [
-    'https://www.googleapis.com/auth/calendar',
-    'https://www.googleapis.com/auth/tasks'  # ← важно для чтения задач
-]
-REDIRECT_URI = os.getenv('REDIRECT_URI')
-CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
-CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')
-TOKEN_URI = 'https://oauth2.googleapis.com/token'
-AUTH_URI = 'https://accounts.google.com/o/oauth2/auth'
 
 def get_auth_url(state):
     params = {
         'client_id': CLIENT_ID,
         'redirect_uri': REDIRECT_URI,
         'response_type': 'code',
-        'scope': ' '.join(SCOPES), # Теперь просим оба доступа
+        'scope': ' '.join(SCOPES),
         'state': state,
         'access_type': 'offline',
-        'prompt': 'consent', # Важно: чтобы перегенерировать refresh_token с новыми правами
+        'prompt': 'consent',
     }
     return f"{AUTH_URI}?{urllib.parse.urlencode(params)}"
 

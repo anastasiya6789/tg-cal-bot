@@ -418,33 +418,18 @@ async def cancel_custom_date(message_or_cb: types.Message | types.CallbackQuery,
 # ================= УПРАВЛЕНИЕ: ПОЛУЧЕНИЕ СПИСКА СОБЫТИЙ =================
 # ================= УПРАВЛЕНИЕ: ПОЛУЧЕНИЕ СПИСКА СОБЫТИЙ =================
 async def _fetch_manageable_events(user_id, date_str, period="day"):
-    """Получаем события из Calendar API и Tasks API, убирая дубли от синхронизации Google"""
+    """Получаем события, строго приоритезируя Tasks API и убирая календарные дубли"""
     from oauth import get_credentials
     from googleapiclient.discovery import build
     
     cr = await get_credentials(user_id)
     if not cr: return []
     
-    events = []
+    tasks_map = {}
     target_dt = datetime.strptime(date_str, "%Y-%m-%d")
     target_dt = tz.localize(target_dt.replace(hour=0, minute=0, second=0))
     
-    # 1. Calendar Events
-    try:
-        svc_cal = build('calendar','v3',credentials=cr)
-        time_min = to_iso(target_dt)
-        time_max = to_iso(target_dt.replace(hour=23, minute=59, second=59))
-        for e in svc_cal.events().list(calendarId='primary', timeMin=time_min, timeMax=time_max, singleEvents=True, orderBy='startTime').execute().get('items', []):
-            events.append({
-                'id': e.get('id'), 'summary': e.get('summary', 'Без названия'),
-                'start': e.get('start', {}), 'end': e.get('end', {}),
-                'description': e.get('description', ''), 'location': e.get('location', ''),
-                '_is_tasks_api': False, '_raw': e
-            })
-    except Exception as ex: 
-        logger.error(f"Fetch calendar events error: {ex}")
-    
-    # 2. Tasks API
+    # 1. Сначала забираем задачи из Tasks API (это источник истины)
     try:
         svc_tasks = build('tasks','v1',credentials=cr)
         tmin = (target_dt - timedelta(days=7)).strftime("%Y-%m-%dT00:00:00Z")
@@ -457,30 +442,51 @@ async def _fetch_manageable_events(user_id, date_str, period="day"):
             if due_dt and period == "day" and due_dt.date() != target_dt.date(): 
                 continue
             
-            events.append({
+            # Нормализуем ключ для сравнения
+            title_norm = t.get('title', '').strip().lower()
+            date_key = due[:10] if due and len(due) >= 10 else (due_dt.strftime("%Y-%m-%d") if due_dt else date_str)
+            
+            tasks_map[(title_norm, date_key)] = {
                 'id': t.get('id'), 'summary': t.get('title', 'Без названия'),
                 'start': {'dateTime': due}, 'end': {'dateTime': due},
                 'description': t.get('notes', ''), 'location': '',
                 '_is_tasks_api': True, '_raw': t
-            })
+            }
     except Exception as ex: 
         logger.error(f"Fetch tasks error: {ex}")
     
-    # ✅ Умная дедупликация: строго предпочитаем Tasks API, календарные дубли отбрасываем
-    unique = {}
-    for ev in events:
-        title_norm = ev['summary'].strip().lower()
-        dt_str = ev['start'].get('dateTime') or ev['start'].get('date', '')
-        date_key = dt_str[:10] if dt_str else ''
-        key = (title_norm, date_key)
+    # 2. Потом забираем события Calendar API, ПРОПУСКАЯ те, что уже есть в Tasks
+    events = []
+    try:
+        svc_cal = build('calendar','v3',credentials=cr)
+        time_min = to_iso(target_dt)
+        time_max = to_iso(target_dt.replace(hour=23, minute=59, second=59))
         
-        # Если ключ уже есть, заменяем ТОЛЬКО если текущее событие из Tasks API
-        if key not in unique or ev.get('_is_tasks_api'):
-            unique[key] = ev
+        for e in svc_cal.events().list(calendarId='primary', timeMin=time_min, timeMax=time_max, singleEvents=True, orderBy='startTime').execute().get('items', []):
+            summary = e.get('summary', 'Без названия')
+            title_norm = summary.strip().lower()
+            start_data = e.get('start', {})
+            dt_str = start_data.get('dateTime') or start_data.get('date', '')
+            date_key = dt_str[:10] if dt_str else date_str
             
-    return list(unique.values())
+            # ✅ Если такая задача уже есть в Tasks API → игнорируем календарную копию
+            if (title_norm, date_key) in tasks_map:
+                continue
+                
+            events.append({
+                'id': e.get('id'), 'summary': summary,
+                'start': start_data, 'end': e.get('end', {}),
+                'description': e.get('description', ''), 'location': e.get('location', ''),
+                '_is_tasks_api': False, '_raw': e
+            })
+    except Exception as ex: 
+        logger.error(f"Fetch calendar events error: {ex}")
+    
+    # Возвращаем: задачи Tasks + уникальные события Calendar
+    return list(tasks_map.values()) + events
 
 # ================= УПРАВЛЕНИЕ: ВЫБОР СОБЫТИЯ =================
+
 @dp.callback_query(F.data.startswith("sched_edit|"))
 @dp.callback_query(F.data.startswith("sched_delete|"))
 async def start_manage(callback: types.CallbackQuery, state: FSMContext):
@@ -499,25 +505,21 @@ async def start_manage(callback: types.CallbackQuery, state: FSMContext):
         
         buttons = []
         for idx, ev in event_map.items():
-            # ✅ Надёжное извлечение времени (показывает точное время даже для 0-минутных задач)
+            # ✅ Надёжное извлечение времени (работает даже для 0-минутных задач)
             start = ev.get('start', {})
             end = ev.get('end', {})
-            is_all_day = 'date' in start and 'dateTime' not in start
+            dt_str = start.get('dateTime') or start.get('date', '')
             
-            if is_all_day:
-                time_str = "весь день"
-            else:
-                dt_str = start.get('dateTime') or start.get('date', '')
-                if dt_str and 'T' in dt_str:
-                    t_start = dt_str.split('T')[1][:5]  # HH:MM
-                    end_dt_str = end.get('dateTime') or end.get('date', '')
-                    if end_dt_str and 'T' in end_dt_str:
-                        t_end = end_dt_str.split('T')[1][:5]
-                        time_str = t_start if t_start == t_end else f"{t_start}-{t_end}"
-                    else:
-                        time_str = t_start
+            if dt_str and 'T' in dt_str:
+                t_start = dt_str.split('T')[1][:5]  # HH:MM
+                end_dt_str = end.get('dateTime') or end.get('date', '')
+                if end_dt_str and 'T' in end_dt_str:
+                    t_end = end_dt_str.split('T')[1][:5]
+                    time_str = t_start if t_start == t_end else f"{t_start}-{t_end}"
                 else:
-                    time_str = "весь день"
+                    time_str = t_start
+            else:
+                time_str = "весь день"
             
             title = ev['summary'][:30]
             cb_data = f"select_{action}|{idx}"

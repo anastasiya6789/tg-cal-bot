@@ -416,41 +416,36 @@ async def cancel_custom_date(message_or_cb: types.Message | types.CallbackQuery,
     if hasattr(message_or_cb, 'answer'): await message_or_cb.answer()
 
 # ================= УПРАВЛЕНИЕ: ПОЛУЧЕНИЕ СПИСКА СОБЫТИЙ =================
+# ================= УПРАВЛЕНИЕ: ПОЛУЧЕНИЕ СПИСКА СОБЫТИЙ =================
 async def _fetch_manageable_events(user_id, date_str, period="day"):
-    """Получаем события из Calendar API и Tasks API для управления"""
+    """Получаем события из Calendar API и Tasks API, убирая дубли от синхронизации Google"""
     from oauth import get_credentials
     from googleapiclient.discovery import build
     
     cr = await get_credentials(user_id)
-    if not cr:
-        return []
+    if not cr: return []
     
     events = []
+    target_dt = datetime.strptime(date_str, "%Y-%m-%d")
+    target_dt = tz.localize(target_dt.replace(hour=0, minute=0, second=0))
     
+    # 1. Calendar Events
     try:
-        # 1. Calendar Events
         svc_cal = build('calendar','v3',credentials=cr)
-        target_dt = datetime.strptime(date_str, "%Y-%m-%d")
-        target_dt = tz.localize(target_dt.replace(hour=0, minute=0, second=0))
         time_min = to_iso(target_dt)
         time_max = to_iso(target_dt.replace(hour=23, minute=59, second=59))
-        
         for e in svc_cal.events().list(calendarId='primary', timeMin=time_min, timeMax=time_max, singleEvents=True, orderBy='startTime').execute().get('items', []):
             events.append({
-                'id': e.get('id'),
-                'summary': e.get('summary', 'Без названия'),
-                'start': e.get('start', {}),
-                'end': e.get('end', {}),
-                'description': e.get('description', ''),
-                'location': e.get('location', ''),
-                '_is_tasks_api': False,
-                '_raw': e
+                'id': e.get('id'), 'summary': e.get('summary', 'Без названия'),
+                'start': e.get('start', {}), 'end': e.get('end', {}),
+                'description': e.get('description', ''), 'location': e.get('location', ''),
+                '_is_tasks_api': False, '_raw': e
             })
-    except Exception as ex:
+    except Exception as ex: 
         logger.error(f"Fetch calendar events error: {ex}")
     
+    # 2. Tasks API
     try:
-        # 2. Tasks API - расширенный диапазон для надёжности
         svc_tasks = build('tasks','v1',credentials=cr)
         tmin = (target_dt - timedelta(days=7)).strftime("%Y-%m-%dT00:00:00Z")
         tmax = (target_dt + timedelta(days=7)).strftime("%Y-%m-%dT23:59:59Z")
@@ -459,26 +454,31 @@ async def _fetch_manageable_events(user_id, date_str, period="day"):
             due = t.get('due')
             if not due: continue
             due_dt = parse_dt(due)
-            
-            # Мягкая фильтрация по дате
-            if due_dt and period == "day":
-                if due_dt.date() != target_dt.date():
-                    continue
+            if due_dt and period == "day" and due_dt.date() != target_dt.date(): 
+                continue
             
             events.append({
-                'id': t.get('id'),
-                'summary': t.get('title', 'Без названия'),
-                'start': {'dateTime': due},
-                'end': {'dateTime': due},
-                'description': t.get('notes', ''),
-                'location': '',
-                '_is_tasks_api': True,
-                '_raw': t
+                'id': t.get('id'), 'summary': t.get('title', 'Без названия'),
+                'start': {'dateTime': due}, 'end': {'dateTime': due},
+                'description': t.get('notes', ''), 'location': '',
+                '_is_tasks_api': True, '_raw': t
             })
-    except Exception as ex:
+    except Exception as ex: 
         logger.error(f"Fetch tasks error: {ex}")
     
-    return events
+    # ✅ ДЕДУПЛИКАЦИЯ: убираем дубли, оставшиеся от синхронизации Google
+    unique = {}
+    for ev in events:
+        title = ev['summary'].strip().lower()
+        dt_str = ev['start'].get('dateTime') or ev['start'].get('date')
+        date_key = dt_str[:10] if dt_str else ''
+        key = (title, date_key)
+        
+        # ✅ Всегда оставляем версию из Tasks API (она точная), календарный дубль отбрасываем
+        if key not in unique or ev.get('_is_tasks_api'):
+            unique[key] = ev
+            
+    return list(unique.values())
 
 # ================= УПРАВЛЕНИЕ: ВЫБОР СОБЫТИЯ =================
 @dp.callback_query(F.data.startswith("sched_edit|"))

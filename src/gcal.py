@@ -108,19 +108,85 @@ async def create_event(uid, data):
     }
     try:
         ev = svc.events().insert(calendarId='primary',body=body).execute()
-        event_id = ev.get('id')
-        return True, f"✅ Создано!\n{ev.get('htmlLink','')}", event_id
+        return True, f"✅ Создано!\n{ev.get('htmlLink','')}", ev.get('id')
     except Exception as ex:
         logger.error(f"Cal err: {ex}")
         return False, f"❌ Ошибка: {ex}", None
 
+# ✅ ФУНКЦИИ ДЛЯ TASKS API
+async def create_task(uid, data):
+    cr = await get_credentials(uid)
+    if not cr: return False, "❌ Сначала подключи Google", None
+    
+    svc = build('tasks','v1',credentials=cr)
+    due_local = datetime.fromisoformat(data['start'])
+    if due_local.tzinfo is None: due_local = tz.localize(due_local)
+    due_utc = due_local.astimezone(pytz.UTC)
+    due_str = due_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    
+    try:
+        task = svc.tasks().insert(tasklist='@default', body={
+            'title': data['title'],
+            'notes': data.get('description', ''),
+            'due': due_str,
+            'status': 'needsAction'
+        }).execute()
+        return True, "✅ Задача создана!", task.get('id')
+    except Exception as ex:
+        logger.error(f"Tasks err: {ex}")
+        return False, f"❌ Ошибка: {ex}", None
+
+async def update_task(uid, task_id, new_data):
+    cr = await get_credentials(uid)
+    if not cr: return False, "❌ Сначала подключи Google"
+    
+    svc = build('tasks','v1',credentials=cr)
+    
+    try:
+        task = svc.tasks().get(tasklist='@default', task=task_id).execute()
+    except Exception as ex:
+        if "404" in str(ex).lower():
+            return False, "❌ Задача не найдена"
+        return False, f"❌ Ошибка: {ex}"
+    
+    if 'title' in new_data:
+        task['title'] = new_data['title']
+    if 'description' in new_data:
+        task['notes'] = new_data['description']
+    if 'due' in new_data:
+        due_local = datetime.fromisoformat(new_data['due'])
+        if due_local.tzinfo is None: due_local = tz.localize(due_local)
+        task['due'] = due_local.astimezone(pytz.UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    
+    try:
+        svc.tasks().update(tasklist='@default', task=task_id, body=task).execute()
+        return True, "✅ Обновлено!"
+    except Exception as ex:
+        logger.error(f"Tasks update err: {ex}")
+        return False, f"❌ Ошибка: {ex}"
+
+async def delete_task(uid, task_id):
+    cr = await get_credentials(uid)
+    if not cr: return False, "❌ Сначала подключи Google"
+    
+    svc = build('tasks','v1',credentials=cr)
+    try:
+        svc.tasks().delete(tasklist='@default', task=task_id).execute()
+        return True, "✅ Удалено!"
+    except Exception as ex:
+        err_str = str(ex).lower()
+        if "404" in err_str or "notfound" in err_str:
+            return True, "✅ Уже удалено"
+        logger.error(f"Tasks delete err: {ex}")
+        return False, f"❌ Ошибка: {ex}"
+
+# ✅ Обновлённый update_event для Calendar API
 async def update_event(uid, event_id, new_data):
     cr = await get_credentials(uid)
     if not cr: return False, "❌ Сначала подключи Google"
     
     svc = build('calendar','v3',credentials=cr)
     
-    # ✅ Получаем текущее событие + обработка 404
     try:
         existing = svc.events().get(calendarId='primary', eventId=event_id).execute()
     except Exception as fetch_err:
@@ -130,22 +196,17 @@ async def update_event(uid, event_id, new_data):
         logger.error(f"Failed to fetch event: {fetch_err}")
         return False, f"❌ Ошибка: {fetch_err}"
     
-    # Обновляем только переданные поля
     if 'title' in new_data:
         existing['summary'] = new_data['title']
-    
     if 'description' in new_data:
         old_desc = existing.get('description', '')
         tag_match = TYPE_TAG_RE.search(old_desc)
         tag = tag_match.group(0) if tag_match else ''
         new_desc = new_data['description'].strip()
         existing['description'] = f"{new_desc}\n{tag}" if new_desc else tag
-    
     if 'location' in new_data:
         existing['location'] = new_data['location'] or ''
-    
     if 'start' in new_data and 'end' in new_data:
-        # ✅ Обработка all-day событий
         if isinstance(new_data['start'], dict) and 'date' in new_data['start']:
             existing['start'] = new_data['start']
             existing['end'] = new_data['end']
@@ -156,7 +217,6 @@ async def update_event(uid, event_id, new_data):
             if en.tzinfo is None: en = tz.localize(en)
             existing['start'] = {'dateTime': to_iso(st), 'timeZone': TZ_NAME}
             existing['end'] = {'dateTime': to_iso(en), 'timeZone': TZ_NAME}
-    
     if 'color' in new_data:
         existing['colorId'] = new_data['color']
     
@@ -178,7 +238,7 @@ async def delete_event(uid, event_id):
     except Exception as ex:
         err_str = str(ex).lower()
         if "404" in err_str or "notfound" in err_str:
-            return True, "✅ Уже удалено"  # Считаем успешным, если уже нет
+            return True, "✅ Уже удалено"
         logger.error(f"Cal delete err: {ex}")
         return False, f"❌ Ошибка: {ex}"
 
@@ -203,7 +263,6 @@ async def get_schedule(uid, period="day", target=None, off=0, lim=20):
     
     items = []
     
-    # 1. Calendar Events
     try:
         cal = build('calendar','v3',credentials=cr)
         seen_ids = set()
@@ -211,7 +270,6 @@ async def get_schedule(uid, period="day", target=None, off=0, lim=20):
             eid = e.get('id')
             if eid in seen_ids: continue
             seen_ids.add(eid)
-            
             sdt = parse_dt(e.get('start',{}).get('dateTime') or e.get('start',{}).get('date'))
             items.append({
                 'summary':e.get('summary',''),
@@ -226,17 +284,20 @@ async def get_schedule(uid, period="day", target=None, off=0, lim=20):
             })
     except Exception as ex: logger.error(f"Cal API: {ex}")
     
-    # 2. Tasks API
     try:
         ts = build('tasks','v1',credentials=cr)
-        tmin = (st - timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
-        tmax = (en + timedelta(days=1)).strftime("%Y-%m-%dT23:59:59Z")
+        tmin = (st - timedelta(days=7)).strftime("%Y-%m-%dT00:00:00Z")
+        tmax = (en + timedelta(days=7)).strftime("%Y-%m-%dT23:59:59Z")
         
         for t in ts.tasks().list(tasklist='@default',dueMin=tmin,dueMax=tmax,showCompleted=False,showHidden=False).execute().get('items',[]):
             due = t.get('due')
             if not due: continue
             due_dt = parse_dt(due)
-            if not due_dt or due_dt < st or due_dt > en: continue
+            if due_dt:
+                due_date_only = due_dt.date()
+                target_date = base.date()
+                if due_date_only != target_date and period == "day":
+                    continue
             
             items.append({
                 'summary':t['title'],
@@ -246,12 +307,11 @@ async def get_schedule(uid, period="day", target=None, off=0, lim=20):
                 'end':{'dateTime':due},
                 '_is_native_task':True,
                 '_sort_dt':due_dt,
-                '_dk':due_dt.strftime("%Y-%m-%d"),
+                '_dk':due_dt.strftime("%Y-%m-%d") if due_dt else None,
                 '_eid':t['id']
             })
     except Exception as ex: logger.error(f"Tasks API: {ex}")
 
-    # Убираем дубли
     deduped = {}
     for item in items:
         key = (item['summary'].strip().lower(), item.get('_dk') or '')
@@ -265,7 +325,6 @@ async def get_schedule(uid, period="day", target=None, off=0, lim=20):
             deduped[key] = item
     items = list(deduped.values())
     
-    # Сортировка и группировка
     items.sort(key=lambda x: x.get('_sort_dt') or datetime.max.replace(tzinfo=tz))
     for it in items: it['_typ'] = detect_type(it)
     
@@ -294,7 +353,6 @@ async def get_schedule(uid, period="day", target=None, off=0, lim=20):
             dk = it.get('_dk')
             if not dk: continue
             dgrp.setdefault(it['_typ'],{}).setdefault(dk,[]).append(it)
-            
         for typ in TYPE_ORDER:
             if typ in dgrp:
                 txt += f"{TYPE_EMOJI[typ]}:\n"
@@ -303,5 +361,4 @@ async def get_schedule(uid, period="day", target=None, off=0, lim=20):
                     for it in dgrp[typ][dk]: txt += fmt_evt(it)+"\n"
                     txt += "\n"
     
-    # ✅ Возвращаем 5 значений
     return True, txt.strip(), more, {"start":st,"end":en}, pag

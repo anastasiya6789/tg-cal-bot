@@ -415,8 +415,9 @@ async def cancel_custom_date(message_or_cb: types.Message | types.CallbackQuery,
     await response.answer("❌ Отменено. Выберите период:")
     if hasattr(message_or_cb, 'answer'): await message_or_cb.answer()
 
-# ================= УПРАВЛЕНИЕ: ПОЛУЧЕНИЕ СПИСКА СОБЫТИЙ (Calendar + Tasks API) =================
-async def _fetch_manageable_events(user_id, date_str):
+# ================= УПРАВЛЕНИЕ: ПОЛУЧЕНИЕ СПИСКА СОБЫТИЙ =================
+async def _fetch_manageable_events(user_id, date_str, period="day"):
+    """Получаем события из Calendar API и Tasks API для управления"""
     from oauth import get_credentials
     from googleapiclient.discovery import build
     
@@ -427,6 +428,7 @@ async def _fetch_manageable_events(user_id, date_str):
     events = []
     
     try:
+        # 1. Calendar Events
         svc_cal = build('calendar','v3',credentials=cr)
         target_dt = datetime.strptime(date_str, "%Y-%m-%d")
         target_dt = tz.localize(target_dt.replace(hour=0, minute=0, second=0))
@@ -448,16 +450,20 @@ async def _fetch_manageable_events(user_id, date_str):
         logger.error(f"Fetch calendar events error: {ex}")
     
     try:
+        # 2. Tasks API - расширенный диапазон для надёжности
         svc_tasks = build('tasks','v1',credentials=cr)
-        tmin = (target_dt - timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
-        tmax = (target_dt + timedelta(days=1)).strftime("%Y-%m-%dT23:59:59Z")
+        tmin = (target_dt - timedelta(days=7)).strftime("%Y-%m-%dT00:00:00Z")
+        tmax = (target_dt + timedelta(days=7)).strftime("%Y-%m-%dT23:59:59Z")
         
         for t in svc_tasks.tasks().list(tasklist='@default', dueMin=tmin, dueMax=tmax, showCompleted=False, showHidden=False).execute().get('items', []):
             due = t.get('due')
             if not due: continue
             due_dt = parse_dt(due)
-            if not due_dt or due_dt < target_dt or due_dt > target_dt.replace(hour=23, minute=59, second=59):
-                continue
+            
+            # Мягкая фильтрация по дате
+            if due_dt and period == "day":
+                if due_dt.date() != target_dt.date():
+                    continue
             
             events.append({
                 'id': t.get('id'),
@@ -483,7 +489,7 @@ async def start_manage(callback: types.CallbackQuery, state: FSMContext):
         date_str = callback.data.split("|")[1]
         await state.update_data(manage_action=action, manage_date=date_str)
         
-        events = await _fetch_manageable_events(callback.from_user.id, date_str)
+        events = await _fetch_manageable_events(callback.from_user.id, date_str, period="day")
         
         if not events:
             await callback.answer("📭 Нет событий для управления на эту дату", show_alert=True)
@@ -587,23 +593,11 @@ async def confirm_delete(callback: types.CallbackQuery, state: FSMContext):
         event_id = event['id']
         is_tasks_api = event.get('_is_tasks_api', False)
         
+        logger.info(f"Deleting: id={event_id}, is_tasks={is_tasks_api}")
+        
         if is_tasks_api:
-            from oauth import get_credentials
-            from googleapiclient.discovery import build
-            cr = await get_credentials(callback.from_user.id)
-            if cr:
-                try:
-                    svc = build('tasks','v1',credentials=cr)
-                    svc.tasks().delete(tasklist='@default', task=event_id).execute()
-                    success, msg = True, "✅ Удалено!"
-                except Exception as ex:
-                    err_str = str(ex).lower()
-                    if "404" in err_str or "notfound" in err_str:
-                        success, msg = True, "✅ Уже удалено"
-                    else:
-                        success, msg = False, f"❌ Ошибка: {ex}"
-            else:
-                success, msg = False, "❌ Сначала подключи Google"
+            from gcal import delete_task
+            success, msg = await delete_task(callback.from_user.id, event_id)
         else:
             success, msg = await delete_event(callback.from_user.id, event_id)
         
@@ -615,7 +609,7 @@ async def confirm_delete(callback: types.CallbackQuery, state: FSMContext):
         
         await callback.answer()
     except Exception as e:
-        logger.error(f"Delete confirm error: {e}")
+        logger.error(f"Delete confirm error: {e}\n{traceback.format_exc()}")
         await callback.answer("❌ Ошибка при удалении", show_alert=True)
 
 # ================= ВЫБОР ПОЛЯ ДЛЯ РЕДАКТИРОВАНИЯ =================
@@ -656,31 +650,15 @@ async def save_new_value(message: types.Message, state: FSMContext):
             await state.clear()
             return
         
+        # ✅ Обработка для Tasks API
         if is_tasks_api:
-            from oauth import get_credentials
-            from googleapiclient.discovery import build
-            cr = await get_credentials(message.from_user.id)
-            if not cr:
-                await message.answer("❌ Сначала подключи Google")
-                await state.clear()
-                return
-            
-            svc = build('tasks','v1',credentials=cr)
-            
-            try:
-                task = svc.tasks().get(tasklist='@default', task=event_id).execute()
-            except Exception as ex:
-                if "404" in str(ex).lower():
-                    await message.answer("❌ Задача не найдена")
-                else:
-                    await message.answer(f"❌ Ошибка: {ex}")
-                await state.clear()
-                return
+            from gcal import update_task
+            update_data = {}
             
             if field == "title":
-                task['title'] = message.text
+                update_data['title'] = message.text
             elif field == "description":
-                task['notes'] = message.text
+                update_data['description'] = message.text
             elif field in ["date", "time"]:
                 try:
                     if field == "date":
@@ -689,6 +667,7 @@ async def save_new_value(message: types.Message, state: FSMContext):
                         else:
                             new_date = datetime.strptime(message.text, "%d.%m")
                             new_date = new_date.replace(year=datetime.now(tz).year)
+                        new_dt = tz.localize(new_date.replace(hour=12))
                     else:
                         new_time = datetime.strptime(message.text, "%H:%M")
                         due = event_raw.get('due', '')
@@ -697,23 +676,23 @@ async def save_new_value(message: types.Message, state: FSMContext):
                             new_dt = datetime.strptime(f"{old_date} {message.text}", "%Y-%m-%d %H:%M")
                         else:
                             new_dt = datetime.now(tz).replace(hour=new_time.hour, minute=new_time.minute)
+                        if new_dt.tzinfo is None: new_dt = tz.localize(new_dt)
                     
-                    due_str = new_date.strftime("%Y-%m-%dT%H:%M:%S.000Z") if field == "date" else new_dt.astimezone(pytz.UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-                    task['due'] = due_str
+                    update_data['due'] = new_dt.isoformat()
                 except ValueError as ve:
                     await message.answer(f"❌ Неверный формат: {ve}")
                     return
             
-            try:
-                svc.tasks().update(tasklist='@default', task=event_id, body=task).execute()
-                await message.answer(f"✅ Обновлено!\n\nНажмите /schedule, чтобы увидеть обновлённое расписание")
-            except Exception as ex:
-                await message.answer(f"❌ Ошибка: {ex}")
+            if update_data:
+                success, msg = await update_task(message.from_user.id, event_id, update_data)
+                await message.answer(f"{msg}\n\nНажмите /schedule, чтобы увидеть обновлённое расписание")
+            else:
+                await message.answer("✅ Значение обновлено")
             
             await state.clear()
             return
         
-        # Calendar API обработка
+        # ✅ Обработка для Calendar API
         update_data = {}
         
         if field == "title":
@@ -774,7 +753,6 @@ async def save_new_value(message: types.Message, state: FSMContext):
                 await message.answer("❌ Неверный формат времени. Пример: `14:30`")
                 return
         
-        # ✅ ИСПРАВЛЕНО: было "if update_" → стало "if update_data:"
         if update_data:
             success, msg = await update_event(message.from_user.id, event_id, update_data)
             await message.answer(f"{msg}\n\nНажмите /schedule, чтобы увидеть обновлённое расписание")

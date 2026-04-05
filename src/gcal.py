@@ -58,38 +58,30 @@ def fmt_evt(e):
     end_data = e.get('end', {})
     is_tasks = e.get('_is_native_task', False)
     
+    # ✅ Задачи из Tasks API — без времени, только название
     if is_tasks:
-        # ✅ Задачи из Tasks API: конвертируем UTC → локальный таймзон
-        raw = e.get('_raw', {})
-        due = raw.get('due', '')
-        
-        if due and 'T' in due:
-            try:
-                # Парсим UTC и конвертируем в локальный часовой пояс
-                due_dt = datetime.fromisoformat(due.replace('Z', '+00:00'))
-                due_local = due_dt.astimezone(tz)
-                time_str = due_local.strftime("%H:%M")
-            except:
-                time_str = "весь день"
-        else:
-            time_str = "весь день"
+        title = e.get('summary', 'Без названия')
+        loc = f" 📍{e.get('location')}" if e.get('location') else ""
+        desc = clean_description(e.get('description', ''))
+        desc_short = f" 💬 {desc[:30]}..." if len(desc) > 30 else (f" 💬 {desc}" if desc else "")
+        return f"{title}{loc}{desc_short}"
+    
+    # ✅ События из Calendar API — с временем (как было)
+    start_dt_str = start_data.get('dateTime')
+    end_dt_str = end_data.get('dateTime')
+    
+    if not start_dt_str or 'T' not in start_dt_str:
+        time_str = "весь день"
     else:
-        # ✅ События из Calendar API
-        start_dt_str = start_data.get('dateTime')
-        end_dt_str = end_data.get('dateTime')
-        
-        if not start_dt_str or 'T' not in start_dt_str:
+        try:
+            t_start = start_dt_str[11:16]
+            if end_dt_str and 'T' in end_dt_str:
+                t_end = end_dt_str[11:16]
+                time_str = t_start if t_start == t_end else f"{t_start}-{t_end}"
+            else:
+                time_str = t_start
+        except (IndexError, TypeError):
             time_str = "весь день"
-        else:
-            try:
-                t_start = start_dt_str[11:16]
-                if end_dt_str and 'T' in end_dt_str:
-                    t_end = end_dt_str[11:16]
-                    time_str = t_start if t_start == t_end else f"{t_start}-{t_end}"
-                else:
-                    time_str = t_start
-            except (IndexError, TypeError):
-                time_str = "весь день"
     
     title = e.get('summary', 'Без названия')
     loc = f" 📍{e.get('location')}" if e.get('location') else ""

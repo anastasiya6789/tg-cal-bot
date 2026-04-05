@@ -511,40 +511,34 @@ async def start_manage(callback: types.CallbackQuery, state: FSMContext):
             is_tasks = ev.get('_is_tasks_api', False)
             
             if is_tasks:
-                # Для Tasks API берём время напрямую из 'due' поля сырого объекта
-                raw = ev.get('_raw', {})
-                due = raw.get('due', '')
-                if due and 'T' in due:
-                    time_part = due.split('T')[1][:5]  # HH:MM
-                    time_str = time_part
-                else:
-                    time_str = "весь день"
+                # ✅ Задачи из Tasks API — без времени
+                time_str = ""
             else:
-                # Для Calendar API — более надёжное извлечение времени
-                start = ev.get('start', {})
-                end = ev.get('end', {})
+                # ✅ События из Calendar API — с временем
+                start_dt_str = start.get('dateTime') or start.get('date')
                 
-                start_dt = start.get('dateTime') or start.get('date')
-                if not start_dt or 'T' not in start_dt:
+                if not start_dt_str or 'T' not in start_dt_str:
                     time_str = "весь день"
                 else:
-                    t_start = start_dt.split('T')[1][:5]  # HH:MM
-                    
-                    end_dt = end.get('dateTime') or end.get('date')
-                    if end_dt and 'T' in end_dt:
-                        t_end = end_dt.split('T')[1][:5]
-                        # Нулевая длительность — показываем одно время
-                        time_str = t_start if t_start == t_end else f"{t_start}-{t_end}"
-                    else:
-                        time_str = t_start
+                    try:
+                        t_start = start_dt_str.split('T')[1][:5]
+                        end_dt_str = end.get('dateTime') or end.get('date')
+                        if end_dt_str and 'T' in end_dt_str:
+                            t_end = end_dt_str.split('T')[1][:5]
+                            time_str = t_start if t_start == t_end else f"{t_start}-{t_end}"
+                        else:
+                            time_str = t_start
+                    except (IndexError, TypeError):
+                        time_str = "весь день"
             
-            # Логирование для отладки
-            logger.info(f"Event {idx}: title={ev['summary']}, is_tasks={is_tasks}, time_str={time_str}, start={start}")
-            
+            # Формируем текст кнопки
             title = ev['summary'][:30]
+            if time_str:
+                btn_text = f"{int(idx)+1}. {time_str} — {title}"
+            else:
+                btn_text = f"{int(idx)+1}. {title}"  # ✅ без времени для задач
             cb_data = f"select_{action}|{idx}"
-            buttons.append([InlineKeyboardButton(text=f"{int(idx)+1}. {time_str} — {title}", callback_data=cb_data)])
-        
+            buttons.append([InlineKeyboardButton(text=btn_text, callback_data=cb_data)])
         buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="back_to_schedule")])
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
         

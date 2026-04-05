@@ -55,7 +55,8 @@ def back_to_schedule_kb():
         [InlineKeyboardButton(text="❌ Отмена", callback_data="back_to_schedule")]
     ])
 
-def confirm_kb(confirm_text: str = "✅ Да", cancel_text: str = "❌ Отмена", confirm_data: str = "confirm"):
+def confirm_kb(confirm_text: str = "✅ Да", cancel_text: str = "❌ Отмена", confirm_data: str = "confirm_create"):
+    """Клавиатура подтверждения"""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=confirm_text, callback_data=confirm_data),
          InlineKeyboardButton(text=cancel_text, callback_data="cancel")]

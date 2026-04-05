@@ -18,8 +18,11 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Регистрируем мидлварь ошибок
-dp.errors.middleware(ErrorsMiddleware())
+# ✅ Хендлер ошибок — просто и работает
+@dp.errors()
+async def errors_handler(update: types.Update, exception: Exception):
+    logger.error(f"❌ Ошибка: {exception}\n{traceback.format_exc()}")
+    return True
 
 # Регистрируем роутеры
 dp.include_router(start.router)
@@ -40,7 +43,6 @@ async def gcal_callback(request):
     except Exception as e:
         logger.error(f"OAuth error: {e}\n{traceback.format_exc()}")
         await bot.send_message(user_id, f"❌ Ошибка: {e}")
-    # Используем BOT_USERNAME из config вместо bot.me.username
     return web.HTTPFound(f"https://t.me/{BOT_USERNAME}")
 
 async def on_startup(app):

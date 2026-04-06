@@ -59,17 +59,16 @@ def fmt_evt(e):
     end_data = e.get('end', {})
     is_tasks = e.get('_is_native_task', False)
     
-    # ✅ Задачи из Tasks API — БЕЗ времени, с описанием
+    # ✅ Задачи из Tasks API
     if is_tasks:
         title = e.get('summary', 'Без названия')
-        loc = f" 📍{e.get('location')}" if e.get('location') else ""
+        loc = e.get('location')
+        loc_block = f"\n📍 {loc}" if loc else ""
         desc = clean_description(e.get('description', ''))
-        
-        # ✅ Показываем описание с новой строки, если есть
         desc_block = f"\n📝 {desc}" if desc else ""
-        return f"📌 {title}{loc}{desc_block}"
+        return f"📌 {title}{loc_block}{desc_block}"
     
-    # ✅ События из Calendar API — с временем и описанием
+    # ✅ События из Calendar API
     start_dt_str = start_data.get('dateTime')
     end_dt_str = end_data.get('dateTime')
     
@@ -87,13 +86,12 @@ def fmt_evt(e):
             time_str = "весь день"
     
     title = e.get('summary', 'Без названия')
-    loc = f" 📍{e.get('location')}" if e.get('location') else ""
+    loc = e.get('location')
+    loc_block = f"\n📍 {loc}" if loc else ""
     desc = clean_description(e.get('description', ''))
-    
-    # ✅ Показываем описание с новой строки, если есть
     desc_block = f"\n📝 {desc}" if desc else ""
     
-    return f"⏰ {time_str} — {title}{loc}{desc_block}"
+    return f"⏰ {time_str} — {title}{loc_block}{desc_block}"
 
 async def create_event(uid, data):
     cr = await get_credentials(uid)

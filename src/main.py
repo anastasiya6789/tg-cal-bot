@@ -2,6 +2,7 @@
 import logging
 import os
 import traceback
+from datetime import datetime  # ✅ Добавил для health_check
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -45,6 +46,21 @@ async def gcal_callback(request):
         await bot.send_message(user_id, f"❌ Ошибка: {e}")
     return web.HTTPFound(f"https://t.me/{BOT_USERNAME}")
 
+# ✅ Health check endpoint для cron-job.org и мониторинга
+async def health_check(request):
+    """Возвращает 200 если бот жив"""
+    try:
+        # Проверяем, что бот может общаться с Telegram
+        me = await bot.get_me()
+        return web.json_response({
+            "status": "ok",
+            "bot": me.username,
+            "timestamp": datetime.now().isoformat()
+        })
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return web.json_response({"status": "error", "message": str(e)}, status=500)
+
 async def on_startup(app):
     await bot.set_webhook(f"{WEBHOOK_URL}/webhook")
     logger.info(f"✅ Webhook установлен: {WEBHOOK_URL}/webhook")
@@ -61,6 +77,9 @@ def main():
     
     app.on_startup.append(on_startup)
     app.router.add_get("/gcal/callback", gcal_callback)
+    
+    # ✅ Регистрируем health check endpoint
+    app.router.add_get("/health", health_check)
     
     logger.info(f"🚀 Запуск бота на порту {os.getenv('PORT', 8080)}")
     web.run_app(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))

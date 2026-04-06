@@ -1,14 +1,14 @@
 # handlers/create.py
 import logging
 from datetime import datetime
-from aiogram import Router, types, F, Bot
+from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
-from aiogram.filters import Command, StateFilter  # ✅ ДОБАВИЛ Command и StateFilter
+from aiogram.filters import Command, StateFilter
 from config import tz, logger
 from states import EventCreation
 from keyboards import create_type_kb, color_selection_kb, confirm_kb, cancel_kb
 from gcal import create_event, create_task
-from db import save_event_id
+from db import save_event_id, save_reminder  # ✅ Добавили save_reminder
 
 router = Router()
 
@@ -51,7 +51,7 @@ async def set_deadline(message: types.Message, state: FSMContext):
                 dt = dt.replace(year=datetime.now(tz).year)
             dt = tz.localize(dt)
         except ValueError:
-            await message.answer("❌ Неверный формат. Пример: `10.04.2026 14:00` или `10.04 14:00`")
+            await message.answer("❌ Неверный формат.")
             return
     await state.update_data(start=dt.isoformat(), end=dt.isoformat(), deadline=dt.strftime("%d.%m.%Y %H:%M"))
     await message.answer("📝 Введите название задачи:")
@@ -70,10 +70,10 @@ async def set_start(message: types.Message, state: FSMContext):
                 dt = dt.replace(year=datetime.now(tz).year)
             dt = tz.localize(dt)
         except ValueError:
-            await message.answer("❌ Неверный формат. Пример: `10.04.2026 14:00` или `10.04 14:00`")
+            await message.answer("❌ Неверный формат.")
             return
     await state.update_data(start=dt.isoformat())
-    await message.answer("📅 Введите дату и время ОКОНЧАНИЯ: `ДД.ММ.ГГГГ ЧЧ:ММ`")
+    await message.answer("📅 Введите дату и время ОКОНЧАНИЯ:")
     await state.set_state(EventCreation.setting_end)
 
 @router.message(EventCreation.setting_end)
@@ -86,7 +86,7 @@ async def set_end(message: types.Message, state: FSMContext):
             dt = dt.replace(year=datetime.now(tz).year)
         dt = tz.localize(dt)
     except ValueError:
-        await message.answer("❌ Неверный формат. Пример: `10.04.2026 15:30` или `10.04 15:30`")
+        await message.answer("❌ Неверный формат.")
         return
     await state.update_data(end=dt.isoformat())
     await message.answer("📝 Введите название события:")
@@ -143,28 +143,14 @@ async def confirm_event(message: types.Message, state: FSMContext):
     
     if data.get("type") == "task":
         deadline_str = data.get('deadline', data.get('start', '')[:16].replace('T', ' '))
-        preview = (
-            f"✅ <b>Предпросмотр задачи</b>\n\n"
-            f"🔖 Название: {data.get('title')}\n"
-            f"⏰ Дедлайн: {deadline_str}\n"
-            f"📍 Локация: {data.get('location') or '—'}\n"
-            f"📝 Описание: {data.get('description') or '—'}\n"
-        )
+        preview = f"✅ <b>Предпросмотр задачи</b>\n\n🔖 {data.get('title')}\n⏰ {deadline_str}\n📍 {data.get('location') or '—'}"
     else:
         start_str = data['start'][:16].replace('T', ' ')
         end_str = data['end'][:16].replace('T', ' ')
-        preview = (
-            f"📋 <b>Предпросмотр</b>\n\n"
-            f"📌 Тип: {type_map.get(data.get('type'), 'Событие')}\n"
-            f"🔖 Название: {data.get('title')}\n"
-            f"🕒 Время: {start_str} – {end_str}\n"
-            f"📍 Локация: {data.get('location') or '—'}\n"
-            f"📝 Описание: {data.get('description') or '—'}\n"
-        )
+        preview = f"📋 <b>Предпросмотр</b>\n\n📌 {type_map.get(data.get('type'))}\n🔖 {data.get('title')}\n🕒 {start_str} – {end_str}\n📍 {data.get('location') or '—'}"
     
     preview += "\nОтправить?"
-    kb = confirm_kb()
-    await message.answer(preview, reply_markup=kb, parse_mode="HTML")
+    await message.answer(preview, reply_markup=confirm_kb(), parse_mode="HTML")
     await state.set_state(EventCreation.confirming)
 
 @router.callback_query(F.data == "confirm_create")
@@ -174,14 +160,9 @@ async def finalize_event(callback: types.CallbackQuery, state: FSMContext):
     title = f"{data.get('title')} ({type_map.get(data.get('type'), 'Событие')})"
 
     event_data = {
-        "title": title,
-        "start": data.get('start'),
-        "end": data.get('end'),
-        "type": data.get("type"),
-        "color": data.get('color'),
-        "location": data.get('location'),
-        "description": data.get('description'),
-        "deadline": data.get('deadline')
+        "title": title, "start": data.get('start'), "end": data.get('end'),
+        "type": data.get("type"), "color": data.get('color'),
+        "location": data.get('location'), "description": data.get('description')
     }
 
     try:
@@ -191,8 +172,12 @@ async def finalize_event(callback: types.CallbackQuery, state: FSMContext):
             success, msg, event_id = await create_event(callback.from_user.id, event_data)
         
         await callback.message.edit_text(msg)
+        
         if success and event_id:
             await save_event_id(callback.from_user.id, event_id)
+            # ✅ СОЗДАЕМ НАПОМИНАНИЕ (по умолчанию 15 минут)
+            await save_reminder(callback.from_user.id, event_id, minutes=15)
+            
     except Exception as e:
         logger.error(f"Create error: {e}")
         await callback.message.edit_text(f"❌ Ошибка: {e}")
@@ -202,5 +187,5 @@ async def finalize_event(callback: types.CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "cancel")
 async def cancel_creation(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text("❌ Создание отменено. Введите `/create` чтобы начать заново.")
+    await callback.message.edit_text("❌ Отменено.")
     await callback.answer()

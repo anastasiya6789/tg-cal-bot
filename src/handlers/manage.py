@@ -8,7 +8,8 @@ from config import tz, logger
 from states import EventManage
 from keyboards import back_to_schedule_kb, delete_confirm_kb, edit_fields_kb
 from gcal import delete_event, delete_task, update_event, update_task, detect_type, _fetch_manageable_events, clean_description
-from db import delete_event_id
+from db import delete_event_id, delete_reminder # ✅ Обновить импорт
+
 
 router = Router()
 
@@ -123,6 +124,9 @@ async def handle_select(callback: types.CallbackQuery, state: FSMContext):
         logger.error(f"Select error: {e}")
         await callback.answer("❌ Ошибка", show_alert=True)
 
+# handlers/manage.py (Фрагмент функции confirm_delete - остальное без изменений)
+# ... (начало файла такое же)
+
 @router.callback_query(F.data.startswith("confirm_delete|"))
 async def confirm_delete(callback: types.CallbackQuery, state: FSMContext):
     try:
@@ -132,7 +136,6 @@ async def confirm_delete(callback: types.CallbackQuery, state: FSMContext):
         
         if idx not in event_map:
             await callback.message.edit_text("❌ Событие не найдено")
-            await callback.answer()
             return
         
         event = event_map[idx]
@@ -146,14 +149,19 @@ async def confirm_delete(callback: types.CallbackQuery, state: FSMContext):
         
         if success or "404" in msg or "notFound" in msg:
             await delete_event_id(callback.from_user.id, event_id)
-            await callback.message.edit_text(f"✅ Удалено!\n\nНажмите /schedule, чтобы увидеть обновлённое расписание")
+            # ✅ УДАЛЯЕМ НАПОМИНАНИЕ
+            await delete_reminder(callback.from_user.id, event_id)
+            
+            await callback.message.edit_text(f"✅ Удалено!\n\nНажмите /schedule")
         else:
             await callback.message.edit_text(msg)
         
         await callback.answer()
     except Exception as e:
         logger.error(f"Delete confirm error: {e}")
-        await callback.answer("❌ Ошибка при удалении", show_alert=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+# ... (остальной код файла без изменений)
 
 @router.callback_query(F.data.startswith("edit_field|"))
 async def choose_field(callback: types.CallbackQuery, state: FSMContext):

@@ -8,11 +8,22 @@ async def init_db():
         await db.execute('''CREATE TABLE IF NOT EXISTS user_tokens (
             user_id INTEGER PRIMARY KEY,
             access_token TEXT, refresh_token TEXT, expires_at REAL)''')
+        
         await db.execute('''CREATE TABLE IF NOT EXISTS user_events (
             user_id INTEGER,
             gcal_event_id TEXT,
             created_at REAL,
             PRIMARY KEY (user_id, gcal_event_id))''')
+        
+        # ✅ НОВАЯ ТАБЛИЦА: Напоминания
+        await db.execute('''CREATE TABLE IF NOT EXISTS reminders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            event_id TEXT,
+            remind_minutes INTEGER DEFAULT 15,
+            is_sent BOOLEAN DEFAULT 0,
+            UNIQUE(user_id, event_id))''')
+            
         await db.commit()
 
 async def save_token(user_id, access_token, refresh_token, expires_in):
@@ -48,3 +59,29 @@ async def delete_event_id(user_id, gcal_event_id):
         await db.execute('DELETE FROM user_events WHERE user_id = ? AND gcal_event_id = ?', (user_id, gcal_event_id))
         await db.commit()
 
+# ==================== ФУНКЦИИ НАПОМИНАНИЙ ====================
+
+async def save_reminder(user_id, event_id, minutes=15):
+    """Создает или обновляет напоминание"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute('''INSERT OR REPLACE INTO reminders (user_id, event_id, remind_minutes, is_sent) 
+                           VALUES (?, ?, ?, 0)''', (user_id, event_id, minutes))
+        await db.commit()
+
+async def delete_reminder(user_id, event_id):
+    """Удаляет напоминание при удалении события"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute('DELETE FROM reminders WHERE user_id = ? AND event_id = ?', (user_id, event_id))
+        await db.commit()
+
+async def get_pending_reminders():
+    """Получает все несообщенные напоминания"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute('SELECT user_id, event_id, remind_minutes FROM reminders WHERE is_sent = 0') as cur:
+            return await cur.fetchall()
+
+async def mark_reminder_sent(user_id, event_id):
+    """Помечает напоминание как отправленное"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute('UPDATE reminders SET is_sent = 1 WHERE user_id = ? AND event_id = ?', (user_id, event_id))
+        await db.commit()

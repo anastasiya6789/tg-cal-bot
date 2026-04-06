@@ -61,8 +61,12 @@ async def delete_event_id(user_id, gcal_event_id):
 
 # ==================== ФУНКЦИИ НАПОМИНАНИЙ ====================
 
+# В функции save_reminder():
 async def save_reminder(user_id, event_id, minutes=15):
     """Создает или обновляет напоминание"""
+    from config import logger
+    logger.info(f"🔔 save_reminder: user={user_id}, event={event_id}, min={minutes}")  # ✅ лог
+    
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute('''INSERT OR REPLACE INTO reminders (user_id, event_id, remind_minutes, is_sent) 
                            VALUES (?, ?, ?, 0)''', (user_id, event_id, minutes))

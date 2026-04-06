@@ -175,9 +175,12 @@ async def finalize_event(callback: types.CallbackQuery, state: FSMContext):
         
         if success and event_id:
             await save_event_id(callback.from_user.id, event_id)
-            # ✅ СОЗДАЕМ НАПОМИНАНИЕ (по умолчанию 15 минут)
-            await save_reminder(callback.from_user.id, event_id, minutes=15)
             
+            # ✅ НАПОМИНАНИЯ ТОЛЬКО ДЛЯ СОБЫТИЙ КАЛЕНДАРЯ (не для Tasks API)
+            if data.get("type") != "task":
+                logger.info(f"💾 Создаю напоминание для {event_id} (user {callback.from_user.id})")
+                await save_reminder(callback.from_user.id, event_id, minutes=15)
+                
     except Exception as e:
         logger.error(f"Create error: {e}")
         await callback.message.edit_text(f"❌ Ошибка: {e}")

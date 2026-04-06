@@ -3,11 +3,11 @@ import logging
 from datetime import datetime
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
-from aiogram.filters import Command, StateFilter  # ✅ ДОБАВИЛ
+from aiogram.filters import Command, StateFilter
 from config import tz, logger
 from states import EventManage
 from keyboards import back_to_schedule_kb, delete_confirm_kb, edit_fields_kb
-from gcal import delete_event, delete_task, update_event, update_task, detect_type, _fetch_manageable_events
+from gcal import delete_event, delete_task, update_event, update_task, detect_type, _fetch_manageable_events, clean_description
 from db import delete_event_id
 
 router = Router()
@@ -56,15 +56,25 @@ async def start_manage(callback: types.CallbackQuery, state: FSMContext):
                         time_str = "весь день"
                 prefix = ""
 
-            title = ev['summary'][:30]
+            title = ev['summary'][:40]  # Чуть длиннее, чтобы влезало с описанием
+            
+            # ✅ ДОБАВЛЯЕМ ОПИСАНИЕ В КНОПКУ
+            desc = clean_description(ev.get('description', ''))
+            if desc:
+                desc_short = desc[:50] + "…" if len(desc) > 50 else desc
+                title_with_desc = f"{title}\n📝 {desc_short}"
+            else:
+                title_with_desc = title
+            
             cb_data = f"select_{action}|{idx}"
             
             if time_str:
-                btn_text = f"{int(idx)+1}. {time_str} — {title}"
+                btn_text = f"{int(idx)+1}. {time_str} — {title_with_desc}"
             else:
-                btn_text = f"{int(idx)+1}. {prefix}{title}"
+                btn_text = f"{int(idx)+1}. {prefix}{title_with_desc}"
                 
             buttons.append([types.InlineKeyboardButton(text=btn_text, callback_data=cb_data)])
+        
         buttons.append([types.InlineKeyboardButton(text="❌ Отмена", callback_data="back_to_schedule")])
         kb = types.InlineKeyboardMarkup(inline_keyboard=buttons)
         

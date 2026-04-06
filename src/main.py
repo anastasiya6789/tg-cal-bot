@@ -61,74 +61,111 @@ async def health_check(request):
 
 # ==================== ФОНОВАЯ ЗАДАЧА НАПОМИНАНИЙ ====================
 
+# ==================== ФОНОВАЯ ЗАДАЧА НАПОМИНАНИЙ (ОБНОВЛЁННАЯ) ====================
+
 async def check_reminders_task():
-    """Запускается раз в 2 минуты и проверяет события"""
-    logger.info("🔔 Фоновая задача напоминаний запущена")
+    """Проверяет ВСЕ события из календаря и шлёт напоминания"""
+    logger.info("🔔 Фоновая задача напоминаний запущена (режим: все события)")
     import pytz
+    from datetime import timedelta
+    from googleapiclient.discovery import build
+    from gcal import fmt_evt, parse_dt
+    from oauth import get_credentials
+    from db import get_token, save_reminder, mark_reminder_sent
+    
     local_tz = pytz.timezone(TZ_NAME)
     
     while True:
         try:
-            await asyncio.sleep(120) # Проверка каждые 2 минуты
-            
-            reminders = await get_pending_reminders()
-            if not reminders:
-                continue
-                
+            await asyncio.sleep(120)  # Проверка каждые 2 минуты
             now = datetime.now(local_tz)
-            processed_count = 0
             
-            # Группируем по юзерам, чтобы не создавать соединение с Google 100 раз
-            # Но для простоты и надежности (т.к. токены индивидуальные) пройдемся циклом
+            # Получаем всех пользователей с токенами
+            async with aiosqlite.connect(DB_PATH) as db:
+                async with db.execute('SELECT user_id FROM user_tokens') as cur:
+                    users = [row[0] for row in await cur.fetchall()]
             
-            for user_id, event_id, minutes_before in reminders:
+            for user_id in users:
                 try:
                     creds = await get_credentials(user_id)
                     if not creds:
-                        # Если токены протухли совсем и не рефрешнулись - пропускаем, чтобы не спамить
                         continue
-                        
+                    
                     svc = build('calendar', 'v3', credentials=creds)
-                    event = svc.events().get(calendarId='primary', eventId=event_id).execute()
                     
-                    start_str = event.get('start', {}).get('dateTime')
-                    if not start_str:
-                        # Если событие на весь день, пока пропускаем (или можно реализовать отдельно)
-                        continue
-                        
-                    event_dt = parse_dt(start_str)
-                    if not event_dt:
-                        continue
-                        
-                    if event_dt.tzinfo is None:
-                        event_dt = local_tz.localize(event_dt)
-                    else:
-                        event_dt = event_dt.astimezone(local_tz)
-                        
-                    remind_time = event_dt - timedelta(minutes=minutes_before)
+                    # ✅ Забираем ВСЕ события на ближайшие 2 часа
+                    time_min = now.isoformat()
+                    time_max = (now + timedelta(hours=2)).isoformat()
                     
-                    # Если время пришло (или уже прошло, но недавно)
-                    if now >= remind_time and (now - remind_time).total_seconds() < 3600: # Окно 1 час
-                        message = f"🔔 <b>Напоминание:</b>\n\n{fmt_evt(event)}"
-                        await bot.send_message(user_id, message, parse_mode="HTML")
+                    events_result = svc.events().list(
+                        calendarId='primary',
+                        timeMin=time_min,
+                        timeMax=time_max,
+                        singleEvents=True,
+                        orderBy='startTime',
+                        maxResults=50
+                    ).execute()
+                    
+                    events = events_result.get('items', [])
+                    
+                    for event in events:
+                        event_id = event.get('id')
+                        summary = event.get('summary', 'Без названия')
                         
-                        await mark_reminder_sent(user_id, event_id)
-                        logger.info(f"✅ Напоминание отправлено юзеру {user_id} про {event.get('summary')}")
-                        processed_count += 1
+                        # Пропускаем задачи из Tasks API (у них нет точного времени)
+                        if event.get('visibility') == 'private' and not event.get('start', {}).get('dateTime'):
+                            continue
+                            
+                        start_str = event.get('start', {}).get('dateTime')
+                        if not start_str or 'T' not in start_str:
+                            continue  # Пропускаем события на весь день
+                            
+                        event_dt = parse_dt(start_str)
+                        if not event_dt:
+                            continue
+                            
+                        if event_dt.tzinfo is None:
+                            event_dt = local_tz.localize(event_dt)
+                        else:
+                            event_dt = event_dt.astimezone(local_tz)
                         
+                        # Проверяем: нужно ли напомнить за 15 минут?
+                        remind_time = event_dt - timedelta(minutes=10)
+                        time_diff = (now - remind_time).total_seconds()
+                        
+                        # Если время напоминания пришло (окно ±5 минут)
+                        if -300 <= time_diff <= 300:  # ±5 минут
+                            # Проверяем, не отправляли ли уже
+                            async with aiosqlite.connect(DB_PATH) as db:
+                                async with db.execute(
+                                    'SELECT is_sent FROM reminders WHERE user_id = ? AND event_id = ?',
+                                    (user_id, event_id)
+                                ) as cur:
+                                    row = await cur.fetchone()
+                                
+                                if row and row[0]:  # Уже отправлено
+                                    continue
+                                
+                                # Отправляем уведомление
+                                message = f"🔔 <b>Напоминание:</b>\n\n{fmt_evt(event)}"
+                                await bot.send_message(user_id, message, parse_mode="HTML")
+                                
+                                # ✅ Создаём или обновляем запись о напоминании
+                                await db.execute('''INSERT OR REPLACE INTO reminders 
+                                                   (user_id, event_id, remind_minutes, is_sent) 
+                                                   VALUES (?, ?, 15, 1)''', 
+                                                (user_id, event_id))
+                                await db.commit()
+                                
+                                logger.info(f"✅ Reminder sent to {user_id} for {summary}")
+                                
                 except Exception as e:
-                    # Ошибка конкретного юзера не должна ломать цикл
-                    if "404" in str(e):
-                         # Событие удалено в гугле, чистим у себя
-                         from db import delete_reminder
-                         await delete_reminder(user_id, event_id)
+                    logger.error(f"❌ Error checking reminders for user {user_id}: {e}")
                     continue
                     
-            if processed_count > 0:
-                logger.info(f"📢 Всего отправлено напоминаний: {processed_count}")
-
         except Exception as e:
-            logger.error(f"❌ Ошибка в цикле напоминаний: {e}")
+            logger.error(f"❌ Error in reminder task loop: {e}")
+            await asyncio.sleep(60)
 
 # ================================================================
 

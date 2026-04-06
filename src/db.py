@@ -33,14 +33,19 @@ async def save_token(user_id, access_token, refresh_token, expires_in):
                          (user_id, access_token, refresh_token, expires_at))
         await db.commit()
 
+# db.py
 async def get_token(user_id):
+    """Просто возвращает токены из БД, без проверки времени"""
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute('SELECT access_token, refresh_token, expires_at FROM user_tokens WHERE user_id = ?', (user_id,)) as cur:
+        async with db.execute(
+            'SELECT access_token, refresh_token, expires_at FROM user_tokens WHERE user_id = ?', 
+            (user_id,)
+        ) as cur:
             row = await cur.fetchone()
-            if not row: return None
-            acc, ref, exp = row
-            if datetime.now(timezone.utc).timestamp() > exp - 300:
+            if not row: 
                 return None
+            acc, ref, exp = row
+            # ✅ УБРАЛИ проверку времени — пусть этим занимается get_credentials
             return acc, ref
 
 async def save_event_id(user_id, gcal_event_id):

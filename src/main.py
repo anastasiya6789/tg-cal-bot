@@ -2,6 +2,7 @@
 import logging
 import os
 import traceback
+import aiosqlite 
 import asyncio
 from datetime import datetime, timedelta
 from aiohttp import web
@@ -63,6 +64,8 @@ async def health_check(request):
 
 # ==================== ФОНОВАЯ ЗАДАЧА НАПОМИНАНИЙ (ОБНОВЛЁННАЯ) ====================
 
+# ==================== ФОНОВАЯ ЗАДАЧА НАПОМИНАНИЙ (ИСПРАВЛЕННАЯ) ====================
+
 async def check_reminders_task():
     """Проверяет ВСЕ события из календаря и шлёт напоминания"""
     logger.info("🔔 Фоновая задача напоминаний запущена (режим: все события)")
@@ -71,7 +74,7 @@ async def check_reminders_task():
     from googleapiclient.discovery import build
     from gcal import fmt_evt, parse_dt
     from oauth import get_credentials
-    from db import get_token, save_reminder, mark_reminder_sent
+    from config import DB_PATH, TZ_NAME
     
     local_tz = pytz.timezone(TZ_NAME)
     
@@ -112,10 +115,7 @@ async def check_reminders_task():
                         event_id = event.get('id')
                         summary = event.get('summary', 'Без названия')
                         
-                        # Пропускаем задачи из Tasks API (у них нет точного времени)
-                        if event.get('visibility') == 'private' and not event.get('start', {}).get('dateTime'):
-                            continue
-                            
+                        # Пропускаем задачи без точного времени
                         start_str = event.get('start', {}).get('dateTime')
                         if not start_str or 'T' not in start_str:
                             continue  # Пропускаем события на весь день
@@ -130,7 +130,7 @@ async def check_reminders_task():
                             event_dt = event_dt.astimezone(local_tz)
                         
                         # Проверяем: нужно ли напомнить за 15 минут?
-                        remind_time = event_dt - timedelta(minutes=10)
+                        remind_time = event_dt - timedelta(minutes=15)
                         time_diff = (now - remind_time).total_seconds()
                         
                         # Если время напоминания пришло (окно ±5 минут)

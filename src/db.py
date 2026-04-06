@@ -47,3 +47,4 @@ async def delete_event_id(user_id, gcal_event_id):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute('DELETE FROM user_events WHERE user_id = ? AND gcal_event_id = ?', (user_id, gcal_event_id))
         await db.commit()
+

@@ -63,7 +63,7 @@ def fmt_evt(e):
         loc = f" 📍{e.get('location')}" if e.get('location') else ""
         desc = clean_description(e.get('description', ''))
         
-        # ✅ Показываем описание, если есть (без обрезки, но с переносом)
+        # ✅ Показываем описание с новой строки, если есть
         desc_block = f"\n📝 {desc}" if desc else ""
         return f"📌 {title}{loc}{desc_block}"
     
@@ -88,7 +88,7 @@ def fmt_evt(e):
     loc = f" 📍{e.get('location')}" if e.get('location') else ""
     desc = clean_description(e.get('description', ''))
     
-    # ✅ Показываем описание, если есть
+    # ✅ Показываем описание с новой строки, если есть
     desc_block = f"\n📝 {desc}" if desc else ""
     
     return f"⏰ {time_str} — {title}{loc}{desc_block}"

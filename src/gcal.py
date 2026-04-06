@@ -12,7 +12,8 @@ TYPE_ORDER = ['meeting', 'task', 'event']
 AUTO_DESC = [
     'изменения в названии, описании','изменения в описании','изменения в названии','изменения в местоположении',
     'changes to title, description','changes to description','changes to title','changes to location',
-    'конференция: присоединиться через google meet','video call: join with google meet',''
+    'конференция: присоединиться через google meet','video call: join with google meet'
+    # ❌ ПУСТАЯ СТРОКА УДАЛЕНА
 ]
 
 def to_iso(dt):
@@ -47,6 +48,7 @@ def clean_description(desc):
     desc_lower = desc.lower().strip()
     for ad in AUTO_DESC:
         ad_clean = ad.lower().strip()
+        if not ad_clean: continue  # ✅ Пропускаем пустые строки, чтобы не ломать логику
         if desc_lower == ad_clean or desc_lower.startswith(ad_clean):
             return ''
     return desc
